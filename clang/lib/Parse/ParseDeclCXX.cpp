@@ -2045,25 +2045,99 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
           Tok.setIdentifierInfo(II);
         }
       }
-      assert(Tok.isOneOf(tok::identifier, tok::kw_int, tok::kw_double,
-                         tok::kw_char));
-      StringRef TagName;
-      if (NextToken().is(tok::colon)) {
-        TagName = Tok.getIdentifierInfo()->getName();
+      // PP-EXT: Detect the new entry form "Type name;" (an analog of
+      // "name : Type;"). Available only in the new "{" group syntax
+      const bool IsNewEntryForm = [&]() {
+        if (!IsNewSyntax) {
+          return false;
+        }
+        unsigned Look = 0;
+        while (PP.LookAhead(Look).is(tok::period) &&
+               PP.LookAhead(Look + 1).is(tok::identifier)) {
+          Look += 2;
+        }
+        if (PP.LookAhead(Look).is(tok::star)) {
+          ++Look;
+        }
+        return PP.LookAhead(Look).is(tok::identifier);
+      }();
+
+      tok::TokenKind TypeTokKind = tok::unknown;
+      std::vector<NameAndPtr> VarTypeNames;
+      bool IsPtr = false;
+      SmallVector<std::string, 4> TagNames;
+
+      if (IsNewEntryForm) {
+        // PP-EXT: Parse the "Type name1[, name2, ...];" entry
+        assert(Tok.isOneOf(tok::identifier, tok::kw_int, tok::kw_double,
+                          tok::kw_float, tok::kw_char, tok::kw_void));
+        TypeTokKind = Tok.getKind();
+        VarTypeNames.push_back({Tok.getIdentifierInfo()->getName(), false});
+        while (NextToken().is(tok::period)) {
+          ConsumeToken();
+          ConsumeToken();
+          assert(Tok.is(tok::identifier));
+          // PP-EXT: getName() returns a stable StringRef, do not call
+          // .str() here (a temporary std::string would leave a dangling
+          // StringRef in VarTypeNames)
+          VarTypeNames.push_back(
+              {Tok.getIdentifierInfo()->getName(), false});
+        }
+        IsPtr = NextToken().is(tok::star);
         ConsumeToken();
-        ConsumeToken();
-        assert(Tok.isOneOf(tok::identifier, tok::kw_void, tok::kw_int,
-                           tok::kw_char, tok::kw_double, tok::kw_float));
+        if (IsPtr) {
+          assert(Tok.is(tok::star));
+          ConsumeToken();
+        }
+        for (;;) {
+          assert(Tok.is(tok::identifier));
+          TagNames.push_back(Tok.getIdentifierInfo()->getName().str());
+          if (!NextToken().is(tok::comma)) {
+            ConsumeToken();
+            break;
+          }
+          ConsumeToken();
+          ConsumeToken();
+        }
+      } else {
+        assert(Tok.isOneOf(tok::identifier, tok::kw_int, tok::kw_double,
+                        tok::kw_char));
+        StringRef TagName;
+        if (NextToken().is(tok::colon)) {
+          TagName = Tok.getIdentifierInfo()->getName();
+          ConsumeToken();
+          ConsumeToken();
+          assert(Tok.isOneOf(tok::identifier, tok::kw_void, tok::kw_int,
+                          tok::kw_char, tok::kw_double, tok::kw_float));
+        }
+        TypeTokKind = Tok.getKind();
+        VarTypeNames.push_back({Tok.getIdentifierInfo()->getName(), false});
+        while (NextToken().is(tok::period)) {
+          ConsumeToken();
+          ConsumeToken();
+          assert(Tok.is(tok::identifier));
+          // PP-EXT: getName() returns a stable StringRef, do not call
+          // .str() here (a temporary std::string would leave a dangling
+          // StringRef in VarTypeNames)
+          VarTypeNames.push_back(
+              {Tok.getIdentifierInfo()->getName(), false});
+        }
+        IsPtr = NextToken().is(tok::star);
+        TagNames.push_back(TagName.str());
       }
+
 #ifdef PPEXT_DUMP
-      printf("!!! [%s] %s\n", TagName.data(),
-             Tok.getIdentifierInfo()->getNameStart());
+    for (const auto &DumpTagName : TagNames) {
+      printf("!!! [%s] %s\n", DumpTagName.c_str(),
+             VarTypeNames.back().first.str().c_str());
+    }
 #endif
 
       // Add struct
-      {
-        // PP-EXT TODO: Use functions for this functionality
-        //       together with ParseDecl.cpp:5038
+      // PP-EXT TODO: Use functions for this functionality
+      //        together with ParseDecl.cpp:5038
+      for (const auto &CurTagName : TagNames) {
+        StringRef TagName = CurTagName;
 #ifdef PPEXT_DUMP
         printf("\n[!!!] TODO: Refactoring: reuse PPCreateGen\n");
 #endif
@@ -2075,25 +2149,14 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
 
         ParseScope StructScope(this, Scope::ClassScope | Scope::DeclScope);
         ParsedAttributes TestAttrs(AttrFactory);
-        // Check next token. If it is a tok::period, then we have the following:
-        // Figure + <tag: Gen.Spec>
-        // Now it is supported only for using with tags
+        // If VarTypeNames contains more than one name, then we have a
+        // nested specialization type, like "tag: Gen.Spec"
         // PP-EXT TODO: Support it for non-tag case: "Figure + <Gen.Spec>"
-        const bool IsSpec = NextToken().is(tok::period);
-        std::vector<NameAndPtr> VarTypeNames;
-        VarTypeNames.push_back({Tok.getIdentifierInfo()->getName(), false});
-        while (NextToken().is(tok::period)) {
-          ConsumeToken();
-          ConsumeToken();
-          assert(Tok.is(tok::identifier));
-          VarTypeNames.push_back(
-              {Tok.getIdentifierInfo()->getName().str(), false});
-        }
+        const bool IsSpec = VarTypeNames.size() > 1;
         ParsedAttributes Attrs(AttrFactory);
         auto VariantName = IsSpec ? PPExtConstructGenName(VarTypeNames, attrs)
                                   : VarTypeNames[0].first.str();
         auto VariantNameIdentifier = &PP.getIdentifierTable().get(VariantName);
-        const bool IsPtr = NextToken().is(tok::star);
         auto TestNameStr = ManglePPStruct(
             Name->getName().str(), TagName.empty()
                                        ? VariantName + (IsPtr ? "_pp_ptr" : "")
@@ -2155,7 +2218,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
         Actions.ActOnTagStartDefinition(getCurScope(), TestDecl);
 
         const DeclSpec::TST FieldType =
-            PPExtGetFieldTypeByTokKind(Tok.getKind());
+            PPExtGetFieldTypeByTokKind(TypeTokKind);
         // PP-EXT TODO: VariantDecl should not be casted to RecordDecl
         auto VariantRecordDecl = cast<RecordDecl>(VariantDecl);
         auto BaseRecordDecl = cast<RecordDecl>(BaseDecl);
@@ -2195,9 +2258,12 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
                   V.VariantTagVariableName, ppMNames);
         }
       }
-      ConsumeToken();
-      if (Tok.is(tok::star)) {
+
+      if (!IsNewEntryForm) {
         ConsumeToken();
+        if (Tok.is(tok::star)) {
+          ConsumeToken();
+        }
       }
       assert(Tok.is(tok::semi));
       ConsumeToken();

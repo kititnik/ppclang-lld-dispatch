@@ -71,7 +71,8 @@ def main():
         "pp-ext-gvinit-linkage.c",
         "pp-mm-default-eq0.c",
         "pp-mm-default-eq0-perimeter.c",
-        "pp-typedef.c"
+        "pp-typedef.c",
+        "pp-pp26.c"
     ]
 
     # Convert to full commands
