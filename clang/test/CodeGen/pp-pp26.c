@@ -49,6 +49,15 @@ typedef struct AbstractFactory {}<> AbstractFactory;
 AbstractFactory + <ForDomestic: void;>;
 AbstractFactory + <ForToy: void;>;
 
+// typedef struct DogNameDecorator {char* name;} case { Dog doggy; } NameDecorator;
+// typedef struct DuckNameDecorator {char* name;} case { Duck donald; } NameDecorator;
+
+typedef struct DogNameDecorator {char* name;} case { } DogNameDecorator;
+typedef struct DuckNameDecorator {char* name;} case { } DuckNameDecorator;
+
+DogNameDecorator + { Dog d1; };
+DuckNameDecorator + { Duck d2; };
+
 //------------------------------------------------------------------------------
 // Обобщающая функция, определяющая интерфейс для создания одну из уток.
 Duck* CreateDuck<AbstractFactory* f>() = 0;
