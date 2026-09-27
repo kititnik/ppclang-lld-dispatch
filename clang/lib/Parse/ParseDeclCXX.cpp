@@ -1809,6 +1809,242 @@ DeclSpec::TST Parser::PPExtGetFieldTypeByTokKind(tok::TokenKind TK) {
   return Res;
 }
 
+void Parser::ParsePPExtPlusEntry(IdentifierInfo* Name, ParsedAttributes& attrs,
+                                 SourceLocation &CurLoc, bool IsNewSyntax) {
+  if (Tok.is(tok::kw_struct)) {
+    CurLoc = ConsumeToken();
+  } else {
+    auto TokIdentName = Tok.getIdentifierInfo()->getName();
+    auto *IdentRDecl = PPExtGetTypeByName(TokIdentName);
+    if (IdentRDecl && TokIdentName != IdentRDecl->getName()) {
+      auto *II = &PP.getIdentifierTable().get(IdentRDecl->getName());
+      Tok.setIdentifierInfo(II);
+    }
+  }
+  // PP-EXT: Detect the new entry form "Type name;" (an analog of
+  // "name : Type;"). Available only in the new "{" group syntax
+  const bool IsNewEntryForm = [&]() {
+    if (!IsNewSyntax) {
+      return false;
+    }
+    unsigned Look = 0;
+    while (PP.LookAhead(Look).is(tok::period) &&
+            PP.LookAhead(Look + 1).is(tok::identifier)) {
+      Look += 2;
+    }
+    if (PP.LookAhead(Look).is(tok::star)) {
+      ++Look;
+    }
+    return PP.LookAhead(Look).is(tok::identifier);
+  }();
+
+  tok::TokenKind TypeTokKind = tok::unknown;
+  std::vector<NameAndPtr> VarTypeNames;
+  bool IsPtr = false;
+  SmallVector<std::string, 4> TagNames;
+
+  if (IsNewEntryForm) {
+    // PP-EXT: Parse the "Type name1[, name2, ...];" entry
+    assert(Tok.isOneOf(tok::identifier, tok::kw_int, tok::kw_double,
+                      tok::kw_float, tok::kw_char, tok::kw_void));
+    TypeTokKind = Tok.getKind();
+    VarTypeNames.push_back({Tok.getIdentifierInfo()->getName(), false});
+    while (NextToken().is(tok::period)) {
+      ConsumeToken();
+      ConsumeToken();
+      assert(Tok.is(tok::identifier));
+      // PP-EXT: getName() returns a stable StringRef, do not call
+      // .str() here (a temporary std::string would leave a dangling
+      // StringRef in VarTypeNames)
+      VarTypeNames.push_back(
+          {Tok.getIdentifierInfo()->getName(), false});
+    }
+    IsPtr = NextToken().is(tok::star);
+    ConsumeToken();
+    if (IsPtr) {
+      assert(Tok.is(tok::star));
+      ConsumeToken();
+    }
+    for (;;) {
+      assert(Tok.is(tok::identifier));
+      TagNames.push_back(Tok.getIdentifierInfo()->getName().str());
+      if (!NextToken().is(tok::comma)) {
+        ConsumeToken();
+        break;
+      }
+      ConsumeToken();
+      ConsumeToken();
+    }
+  } else {
+    assert(Tok.isOneOf(tok::identifier, tok::kw_int, tok::kw_double,
+                    tok::kw_char));
+    StringRef TagName;
+    if (NextToken().is(tok::colon)) {
+      TagName = Tok.getIdentifierInfo()->getName();
+      ConsumeToken();
+      ConsumeToken();
+      assert(Tok.isOneOf(tok::identifier, tok::kw_void, tok::kw_int,
+                      tok::kw_char, tok::kw_double, tok::kw_float));
+    }
+    TypeTokKind = Tok.getKind();
+    VarTypeNames.push_back({Tok.getIdentifierInfo()->getName(), false});
+    while (NextToken().is(tok::period)) {
+      ConsumeToken();
+      ConsumeToken();
+      assert(Tok.is(tok::identifier));
+      // PP-EXT: getName() returns a stable StringRef, do not call
+      // .str() here (a temporary std::string would leave a dangling
+      // StringRef in VarTypeNames)
+      VarTypeNames.push_back(
+          {Tok.getIdentifierInfo()->getName(), false});
+    }
+    IsPtr = NextToken().is(tok::star);
+    TagNames.push_back(TagName.str());
+  }
+
+#ifdef PPEXT_DUMP
+for (const auto &DumpTagName : TagNames) {
+  printf("!!! [%s] %s\n", DumpTagName.c_str(),
+          VarTypeNames.back().first.str().c_str());
+}
+#endif
+
+  // Add struct
+  // PP-EXT TODO: Use functions for this functionality
+  //        together with ParseDecl.cpp:5038
+  for (const auto &CurTagName : TagNames) {
+    StringRef TagName = CurTagName;
+#ifdef PPEXT_DUMP
+    printf("\n[!!!] TODO: Refactoring: reuse PPCreateGen\n");
+#endif
+    SkipBodyInfo TestSkipBody;
+    CXXScopeSpec TestSS;
+    MultiTemplateParamsArg TestTParams;
+    bool TestOwned = true;
+    bool TestIsDependent = false;
+
+    ParseScope StructScope(this, Scope::ClassScope | Scope::DeclScope);
+    ParsedAttributes TestAttrs(AttrFactory);
+    // If VarTypeNames contains more than one name, then we have a
+    // nested specialization type, like "tag: Gen.Spec"
+    // PP-EXT TODO: Support it for non-tag case: "Figure + <Gen.Spec>"
+    const bool IsSpec = VarTypeNames.size() > 1;
+    ParsedAttributes Attrs(AttrFactory);
+    auto VariantName = IsSpec ? PPExtConstructGenName(VarTypeNames, attrs)
+                              : VarTypeNames[0].first.str();
+    auto VariantNameIdentifier = &PP.getIdentifierTable().get(VariantName);
+    auto TestNameStr = ManglePPStruct(
+        Name->getName().str(), TagName.empty()
+                                    ? VariantName + (IsPtr ? "_pp_ptr" : "")
+                                    : TagName.str());
+    auto TestName = &PP.getIdentifierTable().get(TestNameStr);
+
+    SmallVector<StringRef, 8> Parts;
+    auto MainFileID = Actions.getSourceManager().getMainFileID();
+    auto FullFileName =
+        *Actions.getSourceManager().getNonBuiltinFilenameForID(MainFileID);
+    FullFileName.split(Parts, '/');
+    auto ExactFileName = Parts.back();
+    Parts.clear();
+    ExactFileName.split(Parts, '.');
+    auto OnlyFileName = Parts.front().str();
+    const bool NeedCtorsDefinitions = true;
+#ifdef PPEXT_DUMP
+    printf("!!! FullFilename:[%s], OnlyFileName:[%s], Name:[%s]\n",
+            FullFileName.str().c_str(), OnlyFileName.c_str(),
+            Name->getName().str().c_str());
+    printf("[+] Test name: %s, Variant Name: %s\n",
+            TestName->getNameStart(), VariantName.c_str());
+#endif
+    auto TestLocation = SourceLocation();
+
+    PPMangledNames ppMNames;
+    ppMNames.setBaseName(Name->getName().str());
+    ppMNames.addVariantName(TestName->getName().str());
+    ParsingDeclSpec PDS(*this);
+
+    auto BaseDecl =
+        Actions
+            .ActOnTag(getCurScope(), clang::TST_struct,
+                      TagUseKind::Reference, TestLocation, TestSS, Name,
+                      TestLocation, TestAttrs, clang::AS_none, TestLocation,
+                      TestTParams, TestOwned, TestIsDependent,
+                      SourceLocation(), false, clang::TypeResult(), false,
+                      false, OffsetOfState, &TestSkipBody)
+            .get();
+    auto VariantDecl =
+        Actions
+            .ActOnTag(getCurScope(), clang::TST_struct,
+                      TagUseKind::Reference, TestLocation, TestSS,
+                      VariantNameIdentifier, TestLocation, TestAttrs,
+                      clang::AS_none, TestLocation, TestTParams, TestOwned,
+                      TestIsDependent, SourceLocation(), false,
+                      clang::TypeResult(), false, false, OffsetOfState,
+                      &TestSkipBody)
+            .get();
+    auto TestDecl =
+        Actions
+            .ActOnTag(getCurScope(), clang::TST_struct,
+                      TagUseKind::Definition, TestLocation, TestSS,
+                      TestName, TestLocation, TestAttrs, clang::AS_none,
+                      TestLocation, TestTParams, TestOwned, TestIsDependent,
+                      SourceLocation(), false, clang::TypeResult(), false,
+                      false, OffsetOfState, &TestSkipBody)
+            .get();
+    Actions.ActOnTagStartDefinition(getCurScope(), TestDecl);
+
+    const DeclSpec::TST FieldType =
+        PPExtGetFieldTypeByTokKind(TypeTokKind);
+    // PP-EXT TODO: VariantDecl should not be casted to RecordDecl
+    auto VariantRecordDecl = cast<RecordDecl>(VariantDecl);
+    auto BaseRecordDecl = cast<RecordDecl>(BaseDecl);
+    SmallVector<Decl *, 32> FieldDecls;
+    FieldGenerator(kPPHeadFieldName, DeclSpec::TST_struct, BaseRecordDecl,
+                    false, TestAttrs, TestDecl, FieldDecls);
+    FieldGenerator(kPPTailFieldName, FieldType, VariantRecordDecl, IsPtr,
+                    TestAttrs, TestDecl, FieldDecls);
+    SmallVector<Decl *, 32> TestFieldDecls(
+        cast<RecordDecl>(TestDecl)->fields());
+    Actions.ActOnFields(getCurScope(), CurLoc, TestDecl, TestFieldDecls,
+                        CurLoc, CurLoc, attrs);
+
+    StructScope.Exit();
+    Actions.ActOnTagFinishDefinition(getCurScope(), TestDecl,
+                                      SourceRange());
+    unsigned DiagID;
+    const PrintingPolicy &Policy =
+        Actions.getASTContext().getPrintingPolicy();
+    const char *PrevSpec = nullptr;
+    PDS.SetTypeSpecType(DeclSpec::TST_struct, SourceLocation(),
+                        SourceLocation(), PrevSpec, DiagID, TestDecl, true,
+                        Policy);
+
+#ifdef PPEXT_DUMP
+    TestDecl->dump();
+#endif
+
+    std::string GVarName = ManglePPTag(TestNameStr);
+    PPGlobalVars.push_back(VarGenerate(GVarName));
+
+    auto &V = ppMNames.VariantStructNames.back();
+    if (NeedCtorsDefinitions) {
+      AddFunc(V.VariantCreateSpecFuncName, PPFuncMode::CreateSpec,
+              V.VariantTagVariableName, ppMNames);
+      AddFunc(V.VariantInitFuncName, PPFuncMode::Init,
+              V.VariantTagVariableName, ppMNames);
+    }
+  }
+
+  if (!IsNewEntryForm) {
+    ConsumeToken();
+    if (Tok.is(tok::star)) {
+      ConsumeToken();
+    }
+  }
+  assert(Tok.is(tok::semi));
+  ConsumeToken();
+}
+
 void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
                                  SourceLocation StartLoc, DeclSpec &DS,
                                  ParsedTemplateInfo &TemplateInfo,
@@ -2035,239 +2271,13 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
       const bool IsNewSyntax = Tok.is(tok::l_brace);
       assert(IsNewSyntax || Tok.is(tok::less));
       auto CurLoc = IsNewSyntax ? ConsumeBrace() : ConsumeToken();
-      if (Tok.is(tok::kw_struct)) {
-        CurLoc = ConsumeToken();
-      } else {
-        auto TokIdentName = Tok.getIdentifierInfo()->getName();
-        auto *IdentRDecl = PPExtGetTypeByName(TokIdentName);
-        if (IdentRDecl && TokIdentName != IdentRDecl->getName()) {
-          auto *II = &PP.getIdentifierTable().get(IdentRDecl->getName());
-          Tok.setIdentifierInfo(II);
-        }
-      }
-      // PP-EXT: Detect the new entry form "Type name;" (an analog of
-      // "name : Type;"). Available only in the new "{" group syntax
-      const bool IsNewEntryForm = [&]() {
-        if (!IsNewSyntax) {
-          return false;
-        }
-        unsigned Look = 0;
-        while (PP.LookAhead(Look).is(tok::period) &&
-               PP.LookAhead(Look + 1).is(tok::identifier)) {
-          Look += 2;
-        }
-        if (PP.LookAhead(Look).is(tok::star)) {
-          ++Look;
-        }
-        return PP.LookAhead(Look).is(tok::identifier);
-      }();
-
-      tok::TokenKind TypeTokKind = tok::unknown;
-      std::vector<NameAndPtr> VarTypeNames;
-      bool IsPtr = false;
-      SmallVector<std::string, 4> TagNames;
-
-      if (IsNewEntryForm) {
-        // PP-EXT: Parse the "Type name1[, name2, ...];" entry
-        assert(Tok.isOneOf(tok::identifier, tok::kw_int, tok::kw_double,
-                          tok::kw_float, tok::kw_char, tok::kw_void));
-        TypeTokKind = Tok.getKind();
-        VarTypeNames.push_back({Tok.getIdentifierInfo()->getName(), false});
-        while (NextToken().is(tok::period)) {
-          ConsumeToken();
-          ConsumeToken();
-          assert(Tok.is(tok::identifier));
-          // PP-EXT: getName() returns a stable StringRef, do not call
-          // .str() here (a temporary std::string would leave a dangling
-          // StringRef in VarTypeNames)
-          VarTypeNames.push_back(
-              {Tok.getIdentifierInfo()->getName(), false});
-        }
-        IsPtr = NextToken().is(tok::star);
-        ConsumeToken();
-        if (IsPtr) {
-          assert(Tok.is(tok::star));
-          ConsumeToken();
-        }
-        for (;;) {
-          assert(Tok.is(tok::identifier));
-          TagNames.push_back(Tok.getIdentifierInfo()->getName().str());
-          if (!NextToken().is(tok::comma)) {
-            ConsumeToken();
-            break;
-          }
-          ConsumeToken();
-          ConsumeToken();
-        }
-      } else {
-        assert(Tok.isOneOf(tok::identifier, tok::kw_int, tok::kw_double,
-                        tok::kw_char));
-        StringRef TagName;
-        if (NextToken().is(tok::colon)) {
-          TagName = Tok.getIdentifierInfo()->getName();
-          ConsumeToken();
-          ConsumeToken();
-          assert(Tok.isOneOf(tok::identifier, tok::kw_void, tok::kw_int,
-                          tok::kw_char, tok::kw_double, tok::kw_float));
-        }
-        TypeTokKind = Tok.getKind();
-        VarTypeNames.push_back({Tok.getIdentifierInfo()->getName(), false});
-        while (NextToken().is(tok::period)) {
-          ConsumeToken();
-          ConsumeToken();
-          assert(Tok.is(tok::identifier));
-          // PP-EXT: getName() returns a stable StringRef, do not call
-          // .str() here (a temporary std::string would leave a dangling
-          // StringRef in VarTypeNames)
-          VarTypeNames.push_back(
-              {Tok.getIdentifierInfo()->getName(), false});
-        }
-        IsPtr = NextToken().is(tok::star);
-        TagNames.push_back(TagName.str());
-      }
-
-#ifdef PPEXT_DUMP
-    for (const auto &DumpTagName : TagNames) {
-      printf("!!! [%s] %s\n", DumpTagName.c_str(),
-             VarTypeNames.back().first.str().c_str());
-    }
-#endif
-
-      // Add struct
-      // PP-EXT TODO: Use functions for this functionality
-      //        together with ParseDecl.cpp:5038
-      for (const auto &CurTagName : TagNames) {
-        StringRef TagName = CurTagName;
-#ifdef PPEXT_DUMP
-        printf("\n[!!!] TODO: Refactoring: reuse PPCreateGen\n");
-#endif
-        SkipBodyInfo TestSkipBody;
-        CXXScopeSpec TestSS;
-        MultiTemplateParamsArg TestTParams;
-        bool TestOwned = true;
-        bool TestIsDependent = false;
-
-        ParseScope StructScope(this, Scope::ClassScope | Scope::DeclScope);
-        ParsedAttributes TestAttrs(AttrFactory);
-        // If VarTypeNames contains more than one name, then we have a
-        // nested specialization type, like "tag: Gen.Spec"
-        // PP-EXT TODO: Support it for non-tag case: "Figure + <Gen.Spec>"
-        const bool IsSpec = VarTypeNames.size() > 1;
-        ParsedAttributes Attrs(AttrFactory);
-        auto VariantName = IsSpec ? PPExtConstructGenName(VarTypeNames, attrs)
-                                  : VarTypeNames[0].first.str();
-        auto VariantNameIdentifier = &PP.getIdentifierTable().get(VariantName);
-        auto TestNameStr = ManglePPStruct(
-            Name->getName().str(), TagName.empty()
-                                       ? VariantName + (IsPtr ? "_pp_ptr" : "")
-                                       : TagName.str());
-        auto TestName = &PP.getIdentifierTable().get(TestNameStr);
-
-        SmallVector<StringRef, 8> Parts;
-        auto MainFileID = Actions.getSourceManager().getMainFileID();
-        auto FullFileName =
-            *Actions.getSourceManager().getNonBuiltinFilenameForID(MainFileID);
-        FullFileName.split(Parts, '/');
-        auto ExactFileName = Parts.back();
-        Parts.clear();
-        ExactFileName.split(Parts, '.');
-        auto OnlyFileName = Parts.front().str();
-        const bool NeedCtorsDefinitions = true;
-#ifdef PPEXT_DUMP
-        printf("!!! FullFilename:[%s], OnlyFileName:[%s], Name:[%s]\n",
-               FullFileName.str().c_str(), OnlyFileName.c_str(),
-               Name->getName().str().c_str());
-        printf("[+] Test name: %s, Variant Name: %s\n",
-               TestName->getNameStart(), VariantName.c_str());
-#endif
-        auto TestLocation = SourceLocation();
-
-        PPMangledNames ppMNames;
-        ppMNames.setBaseName(Name->getName().str());
-        ppMNames.addVariantName(TestName->getName().str());
-        ParsingDeclSpec PDS(*this);
-
-        auto BaseDecl =
-            Actions
-                .ActOnTag(getCurScope(), clang::TST_struct,
-                          TagUseKind::Reference, TestLocation, TestSS, Name,
-                          TestLocation, TestAttrs, clang::AS_none, TestLocation,
-                          TestTParams, TestOwned, TestIsDependent,
-                          SourceLocation(), false, clang::TypeResult(), false,
-                          false, OffsetOfState, &TestSkipBody)
-                .get();
-        auto VariantDecl =
-            Actions
-                .ActOnTag(getCurScope(), clang::TST_struct,
-                          TagUseKind::Reference, TestLocation, TestSS,
-                          VariantNameIdentifier, TestLocation, TestAttrs,
-                          clang::AS_none, TestLocation, TestTParams, TestOwned,
-                          TestIsDependent, SourceLocation(), false,
-                          clang::TypeResult(), false, false, OffsetOfState,
-                          &TestSkipBody)
-                .get();
-        auto TestDecl =
-            Actions
-                .ActOnTag(getCurScope(), clang::TST_struct,
-                          TagUseKind::Definition, TestLocation, TestSS,
-                          TestName, TestLocation, TestAttrs, clang::AS_none,
-                          TestLocation, TestTParams, TestOwned, TestIsDependent,
-                          SourceLocation(), false, clang::TypeResult(), false,
-                          false, OffsetOfState, &TestSkipBody)
-                .get();
-        Actions.ActOnTagStartDefinition(getCurScope(), TestDecl);
-
-        const DeclSpec::TST FieldType =
-            PPExtGetFieldTypeByTokKind(TypeTokKind);
-        // PP-EXT TODO: VariantDecl should not be casted to RecordDecl
-        auto VariantRecordDecl = cast<RecordDecl>(VariantDecl);
-        auto BaseRecordDecl = cast<RecordDecl>(BaseDecl);
-        SmallVector<Decl *, 32> FieldDecls;
-        FieldGenerator(kPPHeadFieldName, DeclSpec::TST_struct, BaseRecordDecl,
-                       false, TestAttrs, TestDecl, FieldDecls);
-        FieldGenerator(kPPTailFieldName, FieldType, VariantRecordDecl, IsPtr,
-                       TestAttrs, TestDecl, FieldDecls);
-        SmallVector<Decl *, 32> TestFieldDecls(
-            cast<RecordDecl>(TestDecl)->fields());
-        Actions.ActOnFields(getCurScope(), CurLoc, TestDecl, TestFieldDecls,
-                            CurLoc, CurLoc, attrs);
-
-        StructScope.Exit();
-        Actions.ActOnTagFinishDefinition(getCurScope(), TestDecl,
-                                         SourceRange());
-        unsigned DiagID;
-        const PrintingPolicy &Policy =
-            Actions.getASTContext().getPrintingPolicy();
-        const char *PrevSpec = nullptr;
-        PDS.SetTypeSpecType(DeclSpec::TST_struct, SourceLocation(),
-                            SourceLocation(), PrevSpec, DiagID, TestDecl, true,
-                            Policy);
-
-#ifdef PPEXT_DUMP
-        TestDecl->dump();
-#endif
-
-        std::string GVarName = ManglePPTag(TestNameStr);
-        PPGlobalVars.push_back(VarGenerate(GVarName));
-
-        auto &V = ppMNames.VariantStructNames.back();
-        if (NeedCtorsDefinitions) {
-          AddFunc(V.VariantCreateSpecFuncName, PPFuncMode::CreateSpec,
-                  V.VariantTagVariableName, ppMNames);
-          AddFunc(V.VariantInitFuncName, PPFuncMode::Init,
-                  V.VariantTagVariableName, ppMNames);
-        }
-      }
-
-      if (!IsNewEntryForm) {
-        ConsumeToken();
-        if (Tok.is(tok::star)) {
-          ConsumeToken();
-        }
-      }
-      assert(Tok.is(tok::semi));
-      ConsumeToken();
       auto LastGroupTok = IsNewSyntax ? tok::r_brace : tok::greater;
+      while (!Tok.is(LastGroupTok)) {
+        ParsePPExtPlusEntry(Name, attrs, CurLoc, IsNewSyntax);
+        if (!IsNewSyntax) {
+          break;
+        }
+      }
       assert(Tok.is(LastGroupTok));
       IsNewSyntax ? ConsumeBrace() : ConsumeToken();
       assert(Tok.is(tok::semi));

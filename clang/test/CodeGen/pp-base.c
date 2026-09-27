@@ -93,6 +93,9 @@ BaseObject + { NewObject; };
 BaseObject + { int; };
 BaseObject + { Circle; };
 
+struct FigurePP26 { unsigned color; } case { struct Circle; struct Rectangle; };
+FigurePP26 + { Triangle t2; Rectangle r2; };
+
 void PrintFigure<Figure* f>() {
     printf("Default\n");
 }

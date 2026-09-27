@@ -1601,6 +1601,9 @@ private:
   std::optional<SpecsVec> TryParsePPExt(Decl *TagDecl,
                                         SmallVector<Decl *, 32> &FieldDecls);
 
+  void ParsePPExtPlusEntry(IdentifierInfo* Name, ParsedAttributes& Attrs,
+                           SourceLocation &CurLoc, bool IsNewSynax);
+
   void PPExtAddAlign8Attr(ParsedAttributes &Attrs);
 
   void FieldGenerator(StringRef FieldName, DeclSpec::TST FieldType,
