@@ -1873,4 +1873,8 @@ def err_hlsl_number_literal_underflow : Error<
   "float literal has a magnitude that is too small to be represented as a float type">;
 def err_hlsl_rootsig_non_zero_flag : Error<"flag value is neither a literal 0 nor a named value">;
 
+def err_pp_tag_name_conflicts_with_field : Error <
+  "specialization name '%0' conflicts with a field of the generalization; "
+  "use '@' to access the tail">;
+
 } // end of Parser diagnostics

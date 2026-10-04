@@ -150,6 +150,17 @@ typedef struct MammalGroup{} case {} MammalGroup;
 MammalGroup +  { elephant: AnyAnimal.elephant; };
 
 int main() {
+    AnyAnimal.elephant ae;
+    ae.@ = 2.0f;
+    ae.elephant = 1.0f;
+    // CHECK-RT: ae.elephant = 1.000000
+    printf("ae.elephant = %f\n", ae.elephant);
+    // CHECK-RT: ae.@ = 1.000000
+    printf("ae.@ = %f\n", ae.@);
+    AnyAnimal.elephant *ptr_ae = &ae;
+    // CHECK-RT: ptr_ae->elephant = 1.000000
+    printf("ptr_ae->elephant = %f\n", ptr_ae->elephant);
+
     struct Figure f;
     // CHECK-RT:      [foo_test] f->__pp_specialization_type = 0
     test_type_tag(&f);

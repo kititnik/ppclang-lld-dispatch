@@ -1763,6 +1763,44 @@ Parser::ParseCastExpression(CastParseKind ParseKind, bool isAddressOfOperand,
   return Res;
 }
 
+static bool PPExtGetSpecAccessInfo(const Expr* E, StringRef &VariantName,
+                                   RecordDecl *&HeadDecl) {
+  QualType T = E->getType().getCanonicalType();
+  if (T->isPointerType()) {
+    T = T->getPointeeType();
+  }
+  const auto *RT = T->getAs<RecordType>();
+  if (!RT) {
+    return false;
+  }
+  const RecordDecl *RD = RT->getDecl();
+  const auto StructName = RD->getName();
+  if (!IsPPStructSpecialization(StructName)) {
+    return false;
+  }
+  auto [GenName, VarName] = DemanglePPStructSpecialization(StructName);
+  if (VarName.ends_with(kPPPtrSuffix)) {
+    VarName = VarName.substr(0u, VarName.size() - kPPPtrSuffix.size());
+  }
+  const FieldDecl *HeadField = nullptr;
+  for (const FieldDecl *F : RD->fields()) {
+    if (F->getName() == kPPHeadFieldName) {
+      HeadField = F;
+      break;
+    }
+  }
+  if (!HeadField) {
+    return false;
+  }
+  const auto *HeadRT = HeadField->getType()->getAs<RecordType>();
+  if(!HeadRT) {
+    return false;
+  }
+  VariantName = VarName;
+  HeadDecl = HeadRT->getDecl();
+  return true;
+}
+
 ExprResult
 Parser::ParsePostfixExpressionSuffix(ExprResult LHS) {
   // Now that the primary-expression piece of the postfix-expression has been
@@ -2111,7 +2149,28 @@ Parser::ParsePostfixExpressionSuffix(ExprResult LHS) {
           if (NextToken().is(tok::at)) {
             ConsumeToken();
             pp_field_name = kPPTailFieldName;
+          } else if (NextToken().is(tok::identifier)) {
+            StringRef VariantName;
+            RecordDecl *HeadDecl = nullptr;
+            if (PPExtGetSpecAccessInfo(OrigLHS, VariantName, HeadDecl) &&
+                NextToken().getIdentifierInfo()->getName() == VariantName) {
+              bool ConflictWithHeadField = false;
+              for (const FieldDecl* F : HeadDecl->fields()) {
+                if (F->getName() == VariantName) {
+                  ConflictWithHeadField = true;
+                  break;
+                }
+              }
+              if (ConflictWithHeadField) {
+                Diag(NextToken().getLocation(),
+                  diag::err_pp_tag_name_conflicts_with_field) << VariantName;
+              } else {
+                ConsumeToken();
+                pp_field_name = kPPTailFieldName;
+              }
+            }
           }
+
           Tok.startToken();
           Tok.clearFlag(Token::NeedsCleaning);
           Tok.setIdentifierInfo(nullptr);
