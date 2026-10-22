@@ -42,6 +42,8 @@
 #include <cinttypes>
 #include <cstdlib>
 
+#include "PPTable.h"
+
 using namespace llvm;
 using namespace llvm::dwarf;
 using namespace llvm::ELF;
@@ -4989,6 +4991,11 @@ template <class ELFT> void elf::createSyntheticSections(Ctx &ctx) {
   if (ctx.arg.relocatable) {
     ctx.in.gnuStack = std::make_unique<GnuStackSection>(ctx);
     add(*ctx.in.gnuStack);
+  }
+
+  // Add ppTables section for PP support
+  if (!ctx.arg.relocatable) {
+    createPPTables<ELFT>(ctx);
   }
 
   if (ctx.in.symTab)

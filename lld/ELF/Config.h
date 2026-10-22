@@ -74,6 +74,7 @@ class StringTableSection;
 class SymbolTableBaseSection;
 class SymtabShndxSection;
 class SyntheticSection;
+class PPTableSection;
 
 enum ELFKind : uint8_t {
   ELFNoneKind,
@@ -567,6 +568,8 @@ struct UndefinedDiag {
 // Linker generated sections which can be used as inputs and are not specific to
 // a partition.
 struct InStruct {
+  SmallVector<PPTableSection *, 0> ppTables;
+  
   std::unique_ptr<InputSection> attributes;
   std::unique_ptr<SyntheticSection> hexagonAttributes;
   std::unique_ptr<SyntheticSection> riscvAttributes;
