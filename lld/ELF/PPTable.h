@@ -3,6 +3,7 @@
 
 #include "InputSection.h"
 #include "llvm/ADT/StringRef.h"
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -25,6 +26,8 @@ struct PPSymRef {
 struct PPImplRecord {
   PPSymRef handler;
   std::vector<PPSymRef> markers;
+  const InputSectionBase* section;
+  uint64_t offset;
 };
 
 class PPTableSection final : public SyntheticSection {

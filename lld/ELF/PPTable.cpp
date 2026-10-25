@@ -32,7 +32,10 @@ struct PPInputs {
 static constexpr StringLiteral descPrefix = "pp_desc_";
 static constexpr StringLiteral specsPrefix = "pp_specs_";
 static constexpr StringLiteral implPrefix = "pp_impl_";
+static constexpr StringLiteral tablePrefix = "pp_table_";
 static constexpr StringLiteral startSpecsPrefix = "__start_pp_specs_";
+
+static void printHandlerSrc(ELFSyncStream &s, const PPSymRef &handler);
 
 PPTableSection::PPTableSection(Ctx &ctx, StringRef fnName, PPDesc desc,
                                std::vector<PPImplRecord> records)
@@ -56,6 +59,8 @@ void PPTableSection::writeTo(uint8_t *buf) {
   if (!startVAs)
     return;
 
+  std::vector<const PPImplRecord*> cellOwner(desc.tableSize);
+
   for (const PPImplRecord &record : records) {
     if (!record.handler.sym) {
       Err(ctx) << name << ": record without handler";
@@ -66,7 +71,25 @@ void PPTableSection::writeTo(uint8_t *buf) {
       continue;
 
     // TODO: если в ячейке уже есть обработчик - дубликат
+    if (cellOwner[*index] != nullptr) {
+      auto* other = cellOwner[*index];
+      StringRef methodName = name;
+      methodName.consume_front(tablePrefix);
+      auto output = Err(ctx);
+      output << "duplicate handler for " << methodName << "<";
+      for (size_t axis = 0; axis < record.markers.size(); axis++) {
+        if (axis != 0) output << ", ";
+        output << record.markers[axis].sym->getName();
+      }
+      output << ">\n";
+      output << ">>> defined at ";
+      printHandlerSrc(output, other->handler);
+      output << "\n>>> defined at ";
+      printHandlerSrc(output, record.handler);
+      continue;
+    }
 
+    cellOwner[*index] = &record;
     uint8_t *cell = buf + *index * ctx.arg.wordsize;
     uint64_t handlerVA = record.handler.sym->getVA(ctx, record.handler.addend);
     if (ctx.arg.is64) {
@@ -75,6 +98,16 @@ void PPTableSection::writeTo(uint8_t *buf) {
       write32(ctx, cell, handlerVA);
     }
   }
+}
+
+static void printHandlerSrc(ELFSyncStream &s, const PPSymRef &handler) {
+  auto *d = dyn_cast<Defined>(handler.sym);
+  auto *sec = d ? dyn_cast_or_null<InputSectionBase>(d->section) : nullptr;
+  if (!sec) {
+    s << handler.sym->getName();
+    return;
+  }
+  s << sec->getSrcMsg(*d, d->value + handler.addend);
 }
 
 std::optional<std::vector<uint64_t>> PPTableSection::resolveStartVAs() const {
@@ -167,8 +200,10 @@ collectImplRecords(Ctx &ctx, ArrayRef<const InputSectionBase *> implSecs,
   size_t recordSize = (1 + numSpecs) * ctx.arg.wordsize;
   for (const InputSectionBase *implSec : implSecs) {
     std::vector<PPImplRecord> implRecords(implSec->getSize() / recordSize);
-    for (PPImplRecord &record : implRecords) {
-      record.markers.resize(numSpecs);
+    for (size_t i = 0; i < implRecords.size(); ++i) {
+      implRecords[i].markers.resize(numSpecs);
+      implRecords[i].section = implSec;
+      implRecords[i].offset = i * recordSize;
     }
     invokeOnRelocs(*implSec, readImplRecords<ELFT>, *implSec->file, numSpecs,
                    implRecords);
