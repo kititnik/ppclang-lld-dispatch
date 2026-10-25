@@ -245,6 +245,14 @@ template <class ELFT> void elf::createPPTables(Ctx &ctx) {
     if (impl != ppSections.impls.end()) {
       records = collectImplRecords<ELFT>(ctx, impl->second, numSpecs);
     }
+    if (records.empty()) {
+      auto warn = Warn(ctx);
+      warn << "no handlers for " << name << "\n>>> declared in ";
+      if (Defined *d = is->getEnclosingSymbol(0))
+        warn << is->getSrcMsg(*d, 0);
+      else
+        warn << is->file;
+    }
 
     ctx.in.ppTables.push_back(make<PPTableSection>(
         ctx, name, std::move(descInfo), std::move(records)));
