@@ -7,6 +7,7 @@
 #include "Symbols.h"
 #include "Target.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Casting.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +25,7 @@ namespace {
 struct PPInputs {
   SetVector<const InputSectionBase *> descSections;
   DenseMap<StringRef, uint64_t> sizeBySpecName;
+  DenseMap<StringRef, std::vector<const InputSectionBase *>> sectionsBySpecName;
   DenseMap<StringRef, std::vector<const InputSectionBase *>> impls;
 };
 
@@ -70,22 +72,8 @@ void PPTableSection::writeTo(uint8_t *buf) {
     if (!index)
       continue;
 
-    // TODO: если в ячейке уже есть обработчик - дубликат
     if (cellOwner[*index] != nullptr) {
-      auto* other = cellOwner[*index];
-      StringRef methodName = name;
-      methodName.consume_front(tablePrefix);
-      auto output = Err(ctx);
-      output << "duplicate handler for " << methodName << "<";
-      for (size_t axis = 0; axis < record.markers.size(); axis++) {
-        if (axis != 0) output << ", ";
-        output << record.markers[axis].sym->getName();
-      }
-      output << ">\n";
-      output << ">>> defined at ";
-      printHandlerSrc(output, other->handler);
-      output << "\n>>> defined at ";
-      printHandlerSrc(output, record.handler);
+      reportDuplicate(record, *cellOwner[*index], *index, *startVAs);
       continue;
     }
 
@@ -97,6 +85,58 @@ void PPTableSection::writeTo(uint8_t *buf) {
     } else {
       write32(ctx, cell, handlerVA);
     }
+  }
+
+  reportEmptyCells(cellOwner, *startVAs);
+}
+
+std::vector<std::vector<StringRef>> PPTableSection::resolveSpecNames(ArrayRef<uint64_t> startVAs) const {
+  std::vector<std::vector<StringRef>> result(desc.specsStartNames.size());
+  for (size_t axis = 0; axis < desc.specsStartNames.size(); axis++) {
+    std::vector<StringRef> namesByTag(desc.specsSizes[axis]);
+    for(const auto &ppSpecNames : desc.specsNames[axis]) {
+      for (size_t k = 0; k < ppSpecNames.names.size(); k++) {
+        uint64_t recordAddress = ppSpecNames.section->getVA(k * ctx.arg.wordsize);
+        uint64_t tag = (recordAddress - startVAs[axis]) / ctx.arg.wordsize;
+        if (tag >= namesByTag.size()) continue;
+        namesByTag[tag] = ppSpecNames.names[k];
+      }
+    }
+    result[axis] = std::move(namesByTag);
+  }
+  return result;
+}
+
+void PPTableSection::reportDuplicate(const PPImplRecord &record,
+                                     const PPImplRecord &other,
+                                     uint64_t cellIndex,
+                                     ArrayRef<uint64_t> startVAs) const {
+  std::vector<uint64_t> tags = decodeCellIndex(cellIndex);
+  const auto &specNames = resolveSpecNames(startVAs);
+
+  auto output = Err(ctx);
+  output << "duplicate handler for ";
+  printCell(output, tags, specNames);
+  output << "\n>>> defined at ";
+  printHandlerSrc(output, other.handler);
+  output << "\n>>> defined at ";
+  printHandlerSrc(output, record.handler);
+}
+
+void PPTableSection::reportEmptyCells(
+    ArrayRef<const PPImplRecord *> cellOwner,
+    ArrayRef<uint64_t> startVAs) const {
+  if (records.empty() || errCount(ctx))
+    return;
+  
+  const auto &specNames = resolveSpecNames(startVAs);
+  for (size_t i = 0; i < cellOwner.size(); ++i) {
+    if (cellOwner[i])
+      continue;
+    std::vector<uint64_t> tags = decodeCellIndex(i);
+    auto output = Err(ctx);
+    output << "no handler for ";
+    printCell(output, tags, specNames);
   }
 }
 
@@ -146,11 +186,53 @@ PPTableSection::computeCellIndex(const PPImplRecord &record,
   return index;
 }
 
+std::vector<uint64_t> PPTableSection::decodeCellIndex(uint64_t index) const {
+  std::vector<uint64_t> tags(desc.specsSizes.size());
+  for (size_t axis = tags.size(); axis-- > 0;) {
+    tags[axis] = index % desc.specsSizes[axis];
+    index /= desc.specsSizes[axis];
+  }
+  return tags;
+}
+
+void PPTableSection::printCell(
+    ELFSyncStream &s, ArrayRef<uint64_t> tags,
+    ArrayRef<std::vector<StringRef>> specNames) const {
+  StringRef methodName = name;
+  methodName.consume_front(tablePrefix);
+  s << methodName << "<";
+  for (size_t axis = 0; axis < tags.size(); axis++) {
+    if (axis != 0) s << ", ";
+    StringRef specName = specNames[axis][tags[axis]];
+    if (specName.empty()) s << tags[axis];
+    else s << specName;
+  }
+  s << ">";
+}
+
 template <class RelTy>
 static void readDescSpecs(const InputFile &file, std::vector<StringRef> &out,
                           Relocs<RelTy> rels) {
   for (const RelTy &rel : rels) {
     StringRef name = file.getRelocTargetSym(rel).getName();
+    out[rel.r_offset / file.ctx.arg.wordsize] = name;
+  }
+}
+
+template <class ELFT, class RelTy>
+static void readSpecsNames(const InputFile &file, std::vector<StringRef> &out,
+                          Relocs<RelTy> rels) {
+  for (const RelTy &rel : rels) {
+    Symbol &sym = file.getRelocTargetSym(rel);
+    auto *d = dyn_cast<Defined>(&sym);
+    if (!d) continue;
+    auto *sec = dyn_cast_or_null<InputSectionBase>(d->section);
+    if (!sec) continue;
+    uint64_t offset = d->value + getAddend<ELFT>(rel);
+    ArrayRef<uint8_t> data = sec->contentMaybeDecompress();
+    if (offset >= data.size()) continue;
+    StringRef text = toStringRef(data).substr(offset);
+    StringRef name = text.split('\0').first;
     out[rel.r_offset / file.ctx.arg.wordsize] = name;
   }
 }
@@ -184,6 +266,7 @@ static PPInputs collectPPSections(Ctx &ctx) {
       result.descSections.insert(is);
     } else if (name.consume_front(specsPrefix)) {
       result.sizeBySpecName[name] += is->getSize() / ctx.arg.wordsize;
+      result.sectionsBySpecName[name].push_back(is);
     } else if (name.consume_front(implPrefix)) {
       result.impls[name].push_back(is);
     }
@@ -214,27 +297,35 @@ collectImplRecords(Ctx &ctx, ArrayRef<const InputSectionBase *> implSecs,
 
 template <class ELFT>
 static PPDesc parseDesc(Ctx &ctx, const InputSectionBase &desc,
-                        const DenseMap<StringRef, uint64_t> &specsSizes) {
-  std::vector<StringRef> descSpecsNames;
-  descSpecsNames.resize(desc.size / ctx.arg.wordsize);
-  invokeOnRelocs(desc, readDescSpecs, *desc.file, descSpecsNames);
-  size_t tableSize = 1;
-  std::vector<uint64_t> descSpecsSizes;
-  for (const auto &name : descSpecsNames) {
+                        const DenseMap<StringRef, uint64_t> &specsSizes,
+                        const DenseMap<StringRef, std::vector<const InputSectionBase *>> &sectionsBySpecName) {
+  PPDesc result;
+  result.specsStartNames.resize(desc.size / ctx.arg.wordsize);
+  invokeOnRelocs(desc, readDescSpecs, *desc.file, result.specsStartNames);
+  result.tableSize = 1;
+  for (const auto &name : result.specsStartNames) {
     StringRef nameCpy = name;
     nameCpy.consume_front(startSpecsPrefix);
     uint64_t specSize = specsSizes.at(nameCpy);
-    tableSize *= specSize;
-    descSpecsSizes.push_back(specSize);
+    std::vector<PPSpecNames> specNames;
+    const auto &sections = sectionsBySpecName.at(nameCpy);
+    for(const auto &sec : sections) {
+      std::vector<StringRef> names(sec->size / ctx.arg.wordsize);
+      invokeOnRelocs(*sec, readSpecsNames<ELFT>, *sec->file, names);
+      specNames.push_back({sec, std::move(names)});
+    }
+    result.tableSize *= specSize;
+    result.specsSizes.push_back(specSize);
+    result.specsNames.push_back(std::move(specNames));
   }
-  return {std::move(descSpecsNames), std::move(descSpecsSizes), tableSize};
+  return result;
 }
 
 template <class ELFT> void elf::createPPTables(Ctx &ctx) {
   // TODO: если pp_desc_<Fn> встречается дважды, будут созданы две таблицы
   PPInputs ppSections = collectPPSections(ctx);
   for (const InputSectionBase *is : ppSections.descSections) {
-    PPDesc descInfo = parseDesc<ELFT>(ctx, *is, ppSections.sizeBySpecName);
+    PPDesc descInfo = parseDesc<ELFT>(ctx, *is, ppSections.sizeBySpecName, ppSections.sectionsBySpecName);
 
     uint64_t numSpecs = descInfo.specsStartNames.size();
     StringRef name = is->name;
