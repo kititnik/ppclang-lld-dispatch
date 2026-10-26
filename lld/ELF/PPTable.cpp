@@ -61,7 +61,7 @@ void PPTableSection::writeTo(uint8_t *buf) {
   if (!startVAs)
     return;
 
-  std::vector<const PPImplRecord*> cellOwner(desc.tableSize);
+  std::vector<const PPImplRecord *> cellOwner(desc.tableSize);
 
   for (const PPImplRecord &record : records) {
     if (!record.handler.sym) {
@@ -78,27 +78,47 @@ void PPTableSection::writeTo(uint8_t *buf) {
     }
 
     cellOwner[*index] = &record;
-    uint8_t *cell = buf + *index * ctx.arg.wordsize;
-    uint64_t handlerVA = record.handler.sym->getVA(ctx, record.handler.addend);
-    if (ctx.arg.is64) {
-      write64(ctx, cell, handlerVA);
-    } else {
-      write32(ctx, cell, handlerVA);
-    }
+    writeCell(buf, *index,
+              record.handler.sym->getVA(ctx, record.handler.addend));
   }
 
-  reportEmptyCells(cellOwner, *startVAs);
+  if (desc.defaultHandler.sym == nullptr)
+    reportEmptyCells(cellOwner, *startVAs);
+  else
+    fillEmptyCells(buf, cellOwner);
 }
 
-std::vector<std::vector<StringRef>> PPTableSection::resolveSpecNames(ArrayRef<uint64_t> startVAs) const {
+void PPTableSection::writeCell(uint8_t *buf, uint64_t index,
+                               uint64_t va) const {
+  uint8_t *cell = buf + index * ctx.arg.wordsize;
+  if (ctx.arg.is64)
+    write64(ctx, cell, va);
+  else
+    write32(ctx, cell, va);
+}
+
+void PPTableSection::fillEmptyCells(
+    uint8_t *buf, ArrayRef<const PPImplRecord *> cellOwner) const {
+  uint64_t defaultVA =
+      desc.defaultHandler.sym->getVA(ctx, desc.defaultHandler.addend);
+  for (size_t i = 0; i < cellOwner.size(); i++) {
+    if (!cellOwner[i])
+      writeCell(buf, i, defaultVA);
+  }
+}
+
+std::vector<std::vector<StringRef>>
+PPTableSection::resolveSpecNames(ArrayRef<uint64_t> startVAs) const {
   std::vector<std::vector<StringRef>> result(desc.specsStartNames.size());
   for (size_t axis = 0; axis < desc.specsStartNames.size(); axis++) {
     std::vector<StringRef> namesByTag(desc.specsSizes[axis]);
-    for(const auto &ppSpecNames : desc.specsNames[axis]) {
+    for (const auto &ppSpecNames : desc.specsNames[axis]) {
       for (size_t k = 0; k < ppSpecNames.names.size(); k++) {
-        uint64_t recordAddress = ppSpecNames.section->getVA(k * ctx.arg.wordsize);
+        uint64_t recordAddress =
+            ppSpecNames.section->getVA(k * ctx.arg.wordsize);
         uint64_t tag = (recordAddress - startVAs[axis]) / ctx.arg.wordsize;
-        if (tag >= namesByTag.size()) continue;
+        if (tag >= namesByTag.size())
+          continue;
         namesByTag[tag] = ppSpecNames.names[k];
       }
     }
@@ -123,12 +143,11 @@ void PPTableSection::reportDuplicate(const PPImplRecord &record,
   printHandlerSrc(output, record.handler);
 }
 
-void PPTableSection::reportEmptyCells(
-    ArrayRef<const PPImplRecord *> cellOwner,
-    ArrayRef<uint64_t> startVAs) const {
+void PPTableSection::reportEmptyCells(ArrayRef<const PPImplRecord *> cellOwner,
+                                      ArrayRef<uint64_t> startVAs) const {
   if (records.empty() || errCount(ctx))
     return;
-  
+
   const auto &specNames = resolveSpecNames(startVAs);
   for (size_t i = 0; i < cellOwner.size(); ++i) {
     if (cellOwner[i])
@@ -202,35 +221,46 @@ void PPTableSection::printCell(
   methodName.consume_front(tablePrefix);
   s << methodName << "<";
   for (size_t axis = 0; axis < tags.size(); axis++) {
-    if (axis != 0) s << ", ";
+    if (axis != 0)
+      s << ", ";
     StringRef specName = specNames[axis][tags[axis]];
-    if (specName.empty()) s << tags[axis];
-    else s << specName;
+    if (specName.empty())
+      s << tags[axis];
+    else
+      s << specName;
   }
   s << ">";
 }
 
-template <class RelTy>
-static void readDescSpecs(const InputFile &file, std::vector<StringRef> &out,
+template <class ELFT, class RelTy>
+static void readDescSpecs(const InputFile &file, PPDesc &out,
                           Relocs<RelTy> rels) {
   for (const RelTy &rel : rels) {
+    size_t fieldNum = rel.r_offset / file.ctx.arg.wordsize;
+    if (fieldNum == 0) {
+      out.defaultHandler = {&file.getRelocTargetSym(rel), getAddend<ELFT>(rel)};
+      continue;
+    }
     StringRef name = file.getRelocTargetSym(rel).getName();
-    out[rel.r_offset / file.ctx.arg.wordsize] = name;
+    out.specsStartNames[fieldNum - 1] = name;
   }
 }
 
 template <class ELFT, class RelTy>
 static void readSpecsNames(const InputFile &file, std::vector<StringRef> &out,
-                          Relocs<RelTy> rels) {
+                           Relocs<RelTy> rels) {
   for (const RelTy &rel : rels) {
     Symbol &sym = file.getRelocTargetSym(rel);
     auto *d = dyn_cast<Defined>(&sym);
-    if (!d) continue;
+    if (!d)
+      continue;
     auto *sec = dyn_cast_or_null<InputSectionBase>(d->section);
-    if (!sec) continue;
+    if (!sec)
+      continue;
     uint64_t offset = d->value + getAddend<ELFT>(rel);
     ArrayRef<uint8_t> data = sec->contentMaybeDecompress();
-    if (offset >= data.size()) continue;
+    if (offset >= data.size())
+      continue;
     StringRef text = toStringRef(data).substr(offset);
     StringRef name = text.split('\0').first;
     out[rel.r_offset / file.ctx.arg.wordsize] = name;
@@ -296,12 +326,14 @@ collectImplRecords(Ctx &ctx, ArrayRef<const InputSectionBase *> implSecs,
 }
 
 template <class ELFT>
-static PPDesc parseDesc(Ctx &ctx, const InputSectionBase &desc,
-                        const DenseMap<StringRef, uint64_t> &specsSizes,
-                        const DenseMap<StringRef, std::vector<const InputSectionBase *>> &sectionsBySpecName) {
-  PPDesc result;
-  result.specsStartNames.resize(desc.size / ctx.arg.wordsize);
-  invokeOnRelocs(desc, readDescSpecs, *desc.file, result.specsStartNames);
+static PPDesc
+parseDesc(Ctx &ctx, const InputSectionBase &desc,
+          const DenseMap<StringRef, uint64_t> &specsSizes,
+          const DenseMap<StringRef, std::vector<const InputSectionBase *>>
+              &sectionsBySpecName) {
+  PPDesc result{};
+  result.specsStartNames.resize(desc.size / ctx.arg.wordsize - 1);
+  invokeOnRelocs(desc, readDescSpecs<ELFT>, *desc.file, result);
   result.tableSize = 1;
   for (const auto &name : result.specsStartNames) {
     StringRef nameCpy = name;
@@ -309,7 +341,7 @@ static PPDesc parseDesc(Ctx &ctx, const InputSectionBase &desc,
     uint64_t specSize = specsSizes.at(nameCpy);
     std::vector<PPSpecNames> specNames;
     const auto &sections = sectionsBySpecName.at(nameCpy);
-    for(const auto &sec : sections) {
+    for (const auto &sec : sections) {
       std::vector<StringRef> names(sec->size / ctx.arg.wordsize);
       invokeOnRelocs(*sec, readSpecsNames<ELFT>, *sec->file, names);
       specNames.push_back({sec, std::move(names)});
@@ -325,7 +357,8 @@ template <class ELFT> void elf::createPPTables(Ctx &ctx) {
   // TODO: если pp_desc_<Fn> встречается дважды, будут созданы две таблицы
   PPInputs ppSections = collectPPSections(ctx);
   for (const InputSectionBase *is : ppSections.descSections) {
-    PPDesc descInfo = parseDesc<ELFT>(ctx, *is, ppSections.sizeBySpecName, ppSections.sectionsBySpecName);
+    PPDesc descInfo = parseDesc<ELFT>(ctx, *is, ppSections.sizeBySpecName,
+                                      ppSections.sectionsBySpecName);
 
     uint64_t numSpecs = descInfo.specsStartNames.size();
     StringRef name = is->name;
@@ -336,7 +369,7 @@ template <class ELFT> void elf::createPPTables(Ctx &ctx) {
     if (impl != ppSections.impls.end()) {
       records = collectImplRecords<ELFT>(ctx, impl->second, numSpecs);
     }
-    if (records.empty()) {
+    if (records.empty() && descInfo.defaultHandler.sym == nullptr) {
       auto warn = Warn(ctx);
       warn << "no handlers for " << name << "\n>>> declared in ";
       if (Defined *d = is->getEnclosingSymbol(0))
