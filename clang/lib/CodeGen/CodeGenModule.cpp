@@ -6827,6 +6827,35 @@ void CodeGenModule::PPExtRecordCreateSpec(llvm::Function *FnCreateSpec,
   AddGlobalCtor(FnRecordCSArr, 103);
 }
 
+llvm::GlobalVariable* CodeGenModule::PPExtGetOrCreateSpecMarker(StringRef SpecStructName) {
+  assert(IsPPStructSpecialization(SpecStructName) &&
+         "Marker is created only for specializations");
+
+  std::string markerName = ManglePPMarker(SpecStructName);
+  if (auto *existing = getModule().getGlobalVariable(markerName)) {
+    return existing;
+  }
+
+  auto [genName, variantName] = DemanglePPStructSpecialization(SpecStructName);
+
+  SmallString<64> str(variantName);
+  auto *strData = llvm::ConstantDataArray::getString(getLLVMContext(), str, true);
+  auto *strGV = new llvm::GlobalVariable(getModule(), strData->getType(), true,
+                                         llvm::GlobalValue::PrivateLinkage,
+                                         strData, ".pp_spec_name");
+  strGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  strGV->setAlignment(llvm::MaybeAlign(1));
+
+  auto *marker = new llvm::GlobalVariable(
+      getModule(), Int8PtrTy, false,
+      llvm::GlobalValue::LinkageTypes::LinkOnceODRLinkage, strGV, markerName);
+  marker->setAlignment(llvm::MaybeAlign(8));
+  marker->setSection(ManglePPSpecsSection(genName));
+  marker->setComdat(getModule().getOrInsertComdat(markerName));
+  addCompilerUsedGlobal(marker);
+  return marker;
+}
+
 void CodeGenModule::HandlePPExtensionMethods(llvm::Function *F, GlobalDecl GD) {
   PPExtInitStackAllocatedVars(F);
 
@@ -7061,6 +7090,10 @@ void CodeGenModule::HandlePPExtensionMethods(llvm::Function *F, GlobalDecl GD) {
           // (and maybe we do not need it at all, it is a question for further
           // research)
           PPExtRecordCreateSpec(FSpec, RecordTy, *FSpec->getParent());
+
+          if (IsPPStructSpecialization(RecordTy->getName())) {
+            PPExtGetOrCreateSpecMarker(RecordTy->getName());
+          }
         }
       }
     }

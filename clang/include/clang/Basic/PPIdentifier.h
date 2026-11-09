@@ -51,6 +51,22 @@ inline constexpr llvm::StringLiteral kPPSpecSuffix = "__pp_spec";
 inline constexpr llvm::StringLiteral kPPPtrSuffix = "_pp_ptr";
 
 //===----------------------------------------------------------------------===//
+// Linker-visible sections
+//===----------------------------------------------------------------------===//
+
+// Section names must be valid C identifiers (no dots), otherwise the linker
+// does not generate __start_<name> / __stop_<name>.
+inline constexpr llvm::StringLiteral kPPSpecsSectionPrefix = "pp_specs_";
+inline constexpr llvm::StringLiteral kPPImplSectionPrefix = "pp_impl_";
+inline constexpr llvm::StringLiteral kPPDescSectionPrefix = "pp_desc_";
+
+inline constexpr llvm::StringLiteral kPPMarkerPrefix = "__pp_marker_";
+inline constexpr llvm::StringLiteral kPPImplRecordPrefix = "__pp_impl_";
+inline constexpr llvm::StringLiteral kPPDescRecordPrefix = "__pp_desc_";
+
+inline constexpr llvm::StringLiteral kPPStartSpecsPrefix = "__start_pp_specs_";
+
+//===----------------------------------------------------------------------===//
 // Field names
 //===----------------------------------------------------------------------===//
 
@@ -220,6 +236,41 @@ inline std::string ManglePPInit(StringRef Name) {
 
 inline std::string ManglePPAlloc(StringRef Name) {
   return (Twine(kPPAllocPrefix) + Name).str();
+}
+
+/// "Figure" -> "pp_specs_Figure"
+inline std::string ManglePPSpecsSection(StringRef GenName) {
+  return (Twine(kPPSpecsSectionPrefix) + GenName).str();
+}
+
+/// "PrintFigure" -> "pp_impl_PrintFigure"
+inline std::string ManglePPImplSection(StringRef FnName) {
+  return (Twine(kPPImplSectionPrefix) + FnName).str();
+}
+
+/// "PrintFigure" -> "pp_desc_PrintFigure"
+inline std::string ManglePPDescSection(StringRef FnName) {
+  return (Twine(kPPDescSectionPrefix) + FnName).str();
+}
+
+/// "__pp_struct_Figure__rect" -> "__pp_marker___pp_struct_Figure__rect"
+inline std::string ManglePPMarker(StringRef SpecStructName) {
+  return (Twine(kPPMarkerPrefix) + SpecStructName).str();
+}
+
+/// Handler record in pp_impl_<Fn>, named after the handler function.
+inline std::string ManglePPImplRecord(StringRef HandlerName) {
+  return (Twine(kPPImplRecordPrefix) + HandlerName).str();
+}
+
+/// Descriptor record in pp_desc_<Fn>, named after the multimethod.
+inline std::string ManglePPDescRecord(StringRef MMName) {
+  return (Twine(kPPDescRecordPrefix) + MMName).str();
+}
+
+/// "Figure" -> "__start_pp_specs_Figure"
+inline std::string ManglePPStartSpecs(StringRef GenName) {
+  return (Twine(kPPStartSpecsPrefix) + GenName).str();
 }
 
 inline std::string ManglePPDefaultHandler(StringRef FnName) {
