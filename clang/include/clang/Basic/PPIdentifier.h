@@ -66,6 +66,9 @@ inline constexpr llvm::StringLiteral kPPDescRecordPrefix = "__pp_desc_";
 
 inline constexpr llvm::StringLiteral kPPStartSpecsPrefix = "__start_pp_specs_";
 
+// Name of the zeroth specialization `Figure.void`
+inline constexpr llvm::StringLiteral kPPVoidSpecName = "void";
+
 //===----------------------------------------------------------------------===//
 // Field names
 //===----------------------------------------------------------------------===//

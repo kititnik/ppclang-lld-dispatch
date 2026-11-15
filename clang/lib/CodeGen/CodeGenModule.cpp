@@ -6473,6 +6473,29 @@ void CodeGenModule::AddPPSpecialization(llvm::Function *F,
 
   llvm::ReturnInst::Create(getLLVMContext(), BB);
   AddGlobalCtor(FRecorder, 103);
+
+  PPExtEmitImplRecord(F, BaseName, Gens);
+}
+
+void CodeGenModule::PPExtEmitImplRecord(llvm::Function *F, StringRef FnName,
+                                        const FunctionDecl::MMParams &Gens) {
+  // { handler, marker of axis 0, marker of axis 1, ... }
+  SmallVector<llvm::Constant *, 4> fields;
+  fields.push_back(F);
+  for (const auto &genParam : Gens.ParamsList) {
+    fields.push_back(PPExtGetOrCreateSpecMarker(genParam.RD->getName()));
+  }
+
+  auto *recordTy = llvm::ArrayType::get(VoidPtrTy, fields.size());
+  // Internal linkage: records of equal handlers from different files must not
+  // be merged, so the linker can report them as a duplicate.
+  auto *record = new llvm::GlobalVariable(
+      getModule(), recordTy, false, llvm::GlobalValue::InternalLinkage,
+      llvm::ConstantArray::get(recordTy, fields),
+      ManglePPImplRecord(F->getName()));
+  record->setAlignment(llvm::MaybeAlign(8));
+  record->setSection(ManglePPImplSection(FnName));
+  addCompilerUsedGlobal(record);
 }
 
 void CodeGenModule::PPExtInitCreateSpecArray(StringRef GenName,
@@ -6827,16 +6850,20 @@ void CodeGenModule::PPExtRecordCreateSpec(llvm::Function *FnCreateSpec,
   AddGlobalCtor(FnRecordCSArr, 103);
 }
 
-llvm::GlobalVariable* CodeGenModule::PPExtGetOrCreateSpecMarker(StringRef SpecStructName) {
-  assert(IsPPStructSpecialization(SpecStructName) &&
-         "Marker is created only for specializations");
+llvm::GlobalVariable* CodeGenModule::PPExtGetOrCreateSpecMarker(StringRef Name) {
+  // Name is either a specialization ("__pp_struct_Figure__rect") or "void".
+  StringRef genName = Name;
+  StringRef variantName = kPPVoidSpecName;
+  std::string structName = ManglePPStruct(Name);
+  if (IsPPStructSpecialization(Name)) {
+    std::tie(genName, variantName) = DemanglePPStructSpecialization(Name);
+    structName = Name.str();
+  }
 
-  std::string markerName = ManglePPMarker(SpecStructName);
+  std::string markerName = ManglePPMarker(structName);
   if (auto *existing = getModule().getGlobalVariable(markerName)) {
     return existing;
   }
-
-  auto [genName, variantName] = DemanglePPStructSpecialization(SpecStructName);
 
   SmallString<64> str(variantName);
   auto *strData = llvm::ConstantDataArray::getString(getLLVMContext(), str, true);
@@ -7091,9 +7118,7 @@ void CodeGenModule::HandlePPExtensionMethods(llvm::Function *F, GlobalDecl GD) {
           // research)
           PPExtRecordCreateSpec(FSpec, RecordTy, *FSpec->getParent());
 
-          if (IsPPStructSpecialization(RecordTy->getName())) {
-            PPExtGetOrCreateSpecMarker(RecordTy->getName());
-          }
+          PPExtGetOrCreateSpecMarker(RecordTy->getName());
         }
       }
     }

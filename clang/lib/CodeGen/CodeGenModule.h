@@ -1880,9 +1880,11 @@ private:
                           llvm::Value *ParentObject);
   void PPExtRecordCreateSpec(llvm::Function *FnCreateSpec, RecordDecl *RDSpec,
                              llvm::Module &Parent);
-  llvm::GlobalVariable *PPExtGetOrCreateSpecMarker(StringRef SpecStructName);
+  llvm::GlobalVariable *PPExtGetOrCreateSpecMarker(StringRef Name);
 
   void AddPPSpecialization(llvm::Function *F,
+                           const FunctionDecl::MMParams &Gens);
+  void PPExtEmitImplRecord(llvm::Function *F, StringRef FnName,
                            const FunctionDecl::MMParams &Gens);
   void PPExtInitCreateSpecArray(StringRef GenName, llvm::Module &Parent);
   llvm::Function *PPExtCreateMMRecorder(llvm::Function *BaseF);
