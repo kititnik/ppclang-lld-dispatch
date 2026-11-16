@@ -1886,6 +1886,8 @@ private:
                            const FunctionDecl::MMParams &Gens);
   void PPExtEmitImplRecord(llvm::Function *F, StringRef FnName,
                            const FunctionDecl::MMParams &Gens);
+  void PPExtEmitDescRecord(llvm::Function *F, llvm::Function *DefaultHandler,
+                           const FunctionDecl::MMParams &Gens);
   void PPExtInitCreateSpecArray(StringRef GenName, llvm::Module &Parent);
   llvm::Function *PPExtCreateMMRecorder(llvm::Function *BaseF);
   llvm::Function *

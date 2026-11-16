@@ -6495,7 +6495,32 @@ void CodeGenModule::PPExtEmitImplRecord(llvm::Function *F, StringRef FnName,
       ManglePPImplRecord(F->getName()));
   record->setAlignment(llvm::MaybeAlign(8));
   record->setSection(ManglePPImplSection(FnName));
-  addCompilerUsedGlobal(record);
+  addUsedGlobal(record);
+}
+
+void CodeGenModule::PPExtEmitDescRecord(llvm::Function *F,
+                                        llvm::Function *DefaultHandler,
+                                        const FunctionDecl::MMParams &Gens) {
+  // { default handler, &__start_pp_specs_<Gen> of axis 0, of axis 1, ... }
+  SmallVector<llvm::Constant *, 4> fields;
+  fields.push_back(DefaultHandler);
+  for (const auto &genParam : Gens.ParamsList) {
+    auto *baseRD = genParam.BaseRD ? genParam.BaseRD : genParam.RD;
+    fields.push_back(getModule().getOrInsertGlobal(
+        ManglePPStartSpecs(baseRD->getName()), Int8PtrTy));
+  }
+
+  auto *recordTy = llvm::ArrayType::get(VoidPtrTy, fields.size());
+  std::string recordName = ManglePPDescRecord(F->getName());
+  // linkonce_odr + comdat: the multimethod may be emitted by several files,
+  // the linker must keep only one descriptor.
+  auto *record = new llvm::GlobalVariable(
+      getModule(), recordTy, false, llvm::GlobalValue::LinkOnceODRLinkage,
+      llvm::ConstantArray::get(recordTy, fields), recordName);
+  record->setAlignment(llvm::MaybeAlign(8));
+  record->setSection(ManglePPDescSection(DemanglePPMM(F->getName()).first));
+  record->setComdat(getModule().getOrInsertComdat(recordName));
+  addUsedGlobal(record);
 }
 
 void CodeGenModule::PPExtInitCreateSpecArray(StringRef GenName,
@@ -6879,7 +6904,7 @@ llvm::GlobalVariable* CodeGenModule::PPExtGetOrCreateSpecMarker(StringRef Name) 
   marker->setAlignment(llvm::MaybeAlign(8));
   marker->setSection(ManglePPSpecsSection(genName));
   marker->setComdat(getModule().getOrInsertComdat(markerName));
-  addCompilerUsedGlobal(marker);
+  addUsedGlobal(marker);
   return marker;
 }
 
@@ -7162,6 +7187,7 @@ void CodeGenModule::HandlePPExtensionMethods(llvm::Function *F, GlobalDecl GD) {
   }
 
   auto *DefaultHandler = ExtractDefaultPPMMImplementation(F, FD);
+  PPExtEmitDescRecord(F, DefaultHandler, Generalizations);
 
   llvm::ArrayRef<llvm::Type *> Params;
   auto AllocaFTy = llvm::FunctionType::get(VoidTy, Params, false);
