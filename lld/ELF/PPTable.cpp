@@ -39,6 +39,9 @@ static constexpr StringLiteral startSpecsPrefix = "__start_pp_specs_";
 
 static void printHandlerSrc(ELFSyncStream &s, const PPSymRef &handler);
 
+// A pp_specs_<Gen> record is { name, create_spec }.
+static uint64_t specRecordSize(const Ctx &ctx) { return 2 * ctx.arg.wordsize; }
+
 PPTableSection::PPTableSection(Ctx &ctx, StringRef fnName, PPDesc desc,
                                std::vector<PPImplRecord> records)
     : SyntheticSection(ctx, ctx.saver.save("pp_table_" + fnName), SHT_PROGBITS,
@@ -115,8 +118,8 @@ PPTableSection::resolveSpecNames(ArrayRef<uint64_t> startVAs) const {
     for (const auto &ppSpecNames : desc.specsNames[axis]) {
       for (size_t k = 0; k < ppSpecNames.names.size(); k++) {
         uint64_t recordAddress =
-            ppSpecNames.section->getVA(k * ctx.arg.wordsize);
-        uint64_t tag = (recordAddress - startVAs[axis]) / ctx.arg.wordsize;
+            ppSpecNames.section->getVA(k * specRecordSize(ctx));
+        uint64_t tag = (recordAddress - startVAs[axis]) / specRecordSize(ctx);
         if (tag >= namesByTag.size())
           continue;
         namesByTag[tag] = ppSpecNames.names[k];
@@ -194,9 +197,16 @@ PPTableSection::computeCellIndex(const PPImplRecord &record,
       return std::nullopt;
     }
     uint64_t markerVA = marker.sym->getVA(ctx, marker.addend);
-    uint64_t tag = (markerVA - startVAs[axis]) / ctx.arg.wordsize;
+    uint64_t offset = markerVA - startVAs[axis];
+    uint64_t tag = offset / specRecordSize(ctx);
     if (tag >= desc.specsSizes[axis]) {
       Err(ctx) << name << ": marker " << marker.sym->getName() << " is not in "
+               << desc.specsStartNames[axis];
+      return std::nullopt;
+    }
+    if (offset % specRecordSize(ctx) != 0) {
+      Err(ctx) << name << ": marker " << marker.sym->getName()
+               << " does not point to the beginning of a record in "
                << desc.specsStartNames[axis];
       return std::nullopt;
     }
@@ -249,7 +259,11 @@ static void readDescSpecs(const InputFile &file, PPDesc &out,
 template <class ELFT, class RelTy>
 static void readSpecsNames(const InputFile &file, std::vector<StringRef> &out,
                            Relocs<RelTy> rels) {
+  uint64_t recordSize = specRecordSize(file.ctx);
   for (const RelTy &rel : rels) {
+    // Only the name field, the second field points to create_spec
+    if (rel.r_offset % recordSize != 0)
+      continue;
     Symbol &sym = file.getRelocTargetSym(rel);
     auto *d = dyn_cast<Defined>(&sym);
     if (!d)
@@ -263,7 +277,10 @@ static void readSpecsNames(const InputFile &file, std::vector<StringRef> &out,
       continue;
     StringRef text = toStringRef(data).substr(offset);
     StringRef name = text.split('\0').first;
-    out[rel.r_offset / file.ctx.arg.wordsize] = name;
+    size_t index = rel.r_offset / recordSize;
+    if (index >= out.size())
+      continue;
+    out[index] = name;
   }
 }
 
@@ -295,7 +312,13 @@ static PPInputs collectPPSections(Ctx &ctx) {
     if (name.consume_front(descPrefix)) {
       result.descSections.insert(is);
     } else if (name.consume_front(specsPrefix)) {
-      result.sizeBySpecName[name] += is->getSize() / ctx.arg.wordsize;
+      if (is->getSize() % specRecordSize(ctx) != 0) {
+        Err(ctx) << is << ": size " << is->getSize()
+                 << " is not a multiple of the record size "
+                 << specRecordSize(ctx);
+        continue;
+      }
+      result.sizeBySpecName[name] += is->getSize() / specRecordSize(ctx);
       result.sectionsBySpecName[name].push_back(is);
     } else if (name.consume_front(implPrefix)) {
       result.impls[name].push_back(is);
@@ -342,7 +365,7 @@ parseDesc(Ctx &ctx, const InputSectionBase &desc,
     std::vector<PPSpecNames> specNames;
     const auto &sections = sectionsBySpecName.at(nameCpy);
     for (const auto &sec : sections) {
-      std::vector<StringRef> names(sec->size / ctx.arg.wordsize);
+      std::vector<StringRef> names(sec->size / specRecordSize(ctx));
       invokeOnRelocs(*sec, readSpecsNames<ELFT>, *sec->file, names);
       specNames.push_back({sec, std::move(names)});
     }
@@ -356,6 +379,8 @@ parseDesc(Ctx &ctx, const InputSectionBase &desc,
 template <class ELFT> void elf::createPPTables(Ctx &ctx) {
   // TODO: если pp_desc_<Fn> встречается дважды, будут созданы две таблицы
   PPInputs ppSections = collectPPSections(ctx);
+  if (errCount(ctx))
+    return;
   for (const InputSectionBase *is : ppSections.descSections) {
     PPDesc descInfo = parseDesc<ELFT>(ctx, *is, ppSections.sizeBySpecName,
                                       ppSections.sectionsBySpecName);

@@ -6890,6 +6890,11 @@ llvm::GlobalVariable* CodeGenModule::PPExtGetOrCreateSpecMarker(StringRef Name) 
     return existing;
   }
 
+  // "void" goes first in every file, so its tag is 0
+  if (IsPPStructSpecialization(Name)) {
+    PPExtGetOrCreateSpecMarker(genName);
+  }
+
   SmallString<64> str(variantName);
   auto *strData = llvm::ConstantDataArray::getString(getLLVMContext(), str, true);
   auto *strGV = new llvm::GlobalVariable(getModule(), strData->getType(), true,
@@ -6898,9 +6903,23 @@ llvm::GlobalVariable* CodeGenModule::PPExtGetOrCreateSpecMarker(StringRef Name) 
   strGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   strGV->setAlignment(llvm::MaybeAlign(1));
 
+  // The definition comes later in this file or from another one
+  std::string createSpecName =
+      ManglePPSpecFunction(PPSpecFuncKind::CreateSpec, Name);
+  llvm::Function *createSpec = getModule().getFunction(createSpecName);
+  if (!createSpec) {
+    createSpec = llvm::Function::Create(
+        llvm::FunctionType::get(Int8PtrTy, false),
+        llvm::GlobalValue::ExternalLinkage, createSpecName, &getModule());
+  }
+
+  // { name, create_spec }
+  llvm::Constant *fields[] = {strGV, createSpec};
+  auto *recordTy = llvm::ArrayType::get(VoidPtrTy, 2);
   auto *marker = new llvm::GlobalVariable(
-      getModule(), Int8PtrTy, false,
-      llvm::GlobalValue::LinkageTypes::LinkOnceODRLinkage, strGV, markerName);
+      getModule(), recordTy, false,
+      llvm::GlobalValue::LinkageTypes::LinkOnceODRLinkage,
+      llvm::ConstantArray::get(recordTy, fields), markerName);
   marker->setAlignment(llvm::MaybeAlign(8));
   marker->setSection(ManglePPSpecsSection(genName));
   marker->setComdat(getModule().getOrInsertComdat(markerName));
@@ -7010,52 +7029,49 @@ void CodeGenModule::HandlePPExtensionMethods(llvm::Function *F, GlobalDecl GD) {
 #endif
 
       if (Kind == PPSpecFuncKind::GetSpecPtr) {
-        auto *BB = llvm::BasicBlock::Create(getLLVMContext(), "entry", FSpec);
-        llvm::Value *Idx = FSpec->getArg(0);
-        auto arrName = ManglePPCSArr(TypeNameExtracted);
-        auto *InitArr = getModule().getGlobalVariable(arrName);
-        std::vector<llvm::Type *> ArgTypes;
-        auto *ResultType = Int8PtrTy;
-        llvm::FunctionType *FnTy =
-            llvm::FunctionType::get(ResultType, ArgTypes, false);
+        // Call create_spec from record N of pp_specs_<Gen>
+        auto *bb = llvm::BasicBlock::Create(getLLVMContext(), "entry", FSpec);
+        auto *specsStart = getModule().getOrInsertGlobal(
+            ManglePPStartSpecs(TypeNameExtracted), Int8PtrTy);
 
-        auto *FnPtrType = VoidPtrTy;
-
-        // Extend parameter to i64
         // PP-EXT TODO: Change type in function signature
         //    (from get_spec_ptr(i32) to get_spec_ptr(i64))
-        auto ASTLongLongTy = getContext().LongLongTy;
-        auto MyLongLongTy = getTypes().ConvertTypeForMem(ASTLongLongTy);
-        auto *IdxExt = llvm::CastInst::Create(llvm::Instruction::CastOps::SExt,
-                                              Idx, MyLongLongTy, "", BB);
+        auto *idx = llvm::CastInst::Create(llvm::Instruction::CastOps::SExt,
+                                           FSpec->getArg(0), Int64Ty, "", bb);
 
-        // Load pointer to necessary create_spec
-        llvm::Value *TypeTagsIdxs[] = {IdxExt};
-        auto *LoadInitArr = new llvm::LoadInst(FnPtrType, InitArr, "", BB);
-        auto *Elem = llvm::GetElementPtrInst::CreateInBounds(
-            FnPtrType, LoadInitArr, TypeTagsIdxs, "", BB);
-        auto LoadElem = new llvm::LoadInst(FnPtrType, Elem, "", BB);
+        // { name, create_spec }
+        auto *recordTy = llvm::ArrayType::get(VoidPtrTy, 2);
+        llvm::Value *idxs[] = {idx, llvm::ConstantInt::get(Int32Ty, 1)};
+        auto *field = llvm::GetElementPtrInst::CreateInBounds(
+            recordTy, specsStart, idxs, "", bb);
+        auto *createSpec = new llvm::LoadInst(VoidPtrTy, field, "", bb);
 
-        // Execute create_spec
-        SmallVector<llvm::Value *> VecArgs;
-        ArrayRef<llvm::Value *> Args(VecArgs);
-        auto *CI = llvm::CallInst::Create(FnTy, LoadElem, Args, "call_res", BB);
-        llvm::ReturnInst::Create(getLLVMContext(), CI, BB);
+        SmallVector<llvm::Value *> noArgs;
+        auto *call = llvm::CallInst::Create(
+            llvm::FunctionType::get(Int8PtrTy, false), createSpec, noArgs,
+            "call_res", bb);
+        llvm::ReturnInst::Create(getLLVMContext(), call, bb);
         continue;
       }
 
       if (Kind == PPSpecFuncKind::GetSpecSize) {
-        auto *BB = llvm::BasicBlock::Create(getLLVMContext(), "entry", FSpec);
-        auto gvName = ManglePPTags(TypeNameExtracted);
-        auto *GV = getModule().getGlobalVariable(gvName);
-        auto ASTIntTy = getContext().IntTy;
-        auto IntTy = getTypes().ConvertTypeForMem(ASTIntTy);
-        auto *LoadGlobalTag = new llvm::LoadInst(IntTy, GV, "tags", BB);
-        llvm::APInt api1(32, 1);
-        auto *OneVal = llvm::ConstantInt::get(getLLVMContext(), api1);
-        auto *IncrementedTags =
-            llvm::BinaryOperator::CreateNSWAdd(LoadGlobalTag, OneVal, "", BB);
-        llvm::ReturnInst::Create(getLLVMContext(), IncrementedTags, BB);
+        // Number of records in pp_specs_<Gen>, "void" included
+        auto *bb = llvm::BasicBlock::Create(getLLVMContext(), "entry", FSpec);
+        auto *specsStart = getModule().getOrInsertGlobal(
+            ManglePPStartSpecs(TypeNameExtracted), Int8PtrTy);
+        auto *specsStop = getModule().getOrInsertGlobal(
+            ManglePPStopSpecs(TypeNameExtracted), Int8PtrTy);
+        auto *startInt = new llvm::PtrToIntInst(specsStart, Int64Ty, "", bb);
+        auto *stopInt = new llvm::PtrToIntInst(specsStop, Int64Ty, "", bb);
+        auto *bytes = llvm::BinaryOperator::CreateSub(stopInt, startInt, "", bb);
+
+        auto *recordTy = llvm::ArrayType::get(VoidPtrTy, 2);
+        auto *recordSize = llvm::ConstantInt::get(
+            Int64Ty, getDataLayout().getTypeAllocSize(recordTy));
+        auto *count =
+            llvm::BinaryOperator::CreateExactUDiv(bytes, recordSize, "", bb);
+        auto *result = new llvm::TruncInst(count, IntTy, "", bb);
+        llvm::ReturnInst::Create(getLLVMContext(), result, bb);
         continue;
       }
 

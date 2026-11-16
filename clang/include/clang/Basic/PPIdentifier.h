@@ -65,6 +65,7 @@ inline constexpr llvm::StringLiteral kPPImplRecordPrefix = "__pp_impl_";
 inline constexpr llvm::StringLiteral kPPDescRecordPrefix = "__pp_desc_";
 
 inline constexpr llvm::StringLiteral kPPStartSpecsPrefix = "__start_pp_specs_";
+inline constexpr llvm::StringLiteral kPPStopSpecsPrefix = "__stop_pp_specs_";
 
 // Name of the zeroth specialization `Figure.void`
 inline constexpr llvm::StringLiteral kPPVoidSpecName = "void";
@@ -274,6 +275,11 @@ inline std::string ManglePPDescRecord(StringRef MMName) {
 /// "Figure" -> "__start_pp_specs_Figure"
 inline std::string ManglePPStartSpecs(StringRef GenName) {
   return (Twine(kPPStartSpecsPrefix) + GenName).str();
+}
+
+/// "Figure" -> "__stop_pp_specs_Figure"
+inline std::string ManglePPStopSpecs(StringRef GenName) {
+  return (Twine(kPPStopSpecsPrefix) + GenName).str();
 }
 
 inline std::string ManglePPDefaultHandler(StringRef FnName) {
