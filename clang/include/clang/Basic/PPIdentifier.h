@@ -66,6 +66,10 @@ inline constexpr llvm::StringLiteral kPPDescRecordPrefix = "__pp_desc_";
 
 inline constexpr llvm::StringLiteral kPPStartSpecsPrefix = "__start_pp_specs_";
 inline constexpr llvm::StringLiteral kPPStopSpecsPrefix = "__stop_pp_specs_";
+inline constexpr llvm::StringLiteral kPPStartTablePrefix = "__start_pp_table_";
+
+// Absolute symbol defined by the linker, its value is the tag
+inline constexpr llvm::StringLiteral kPPTagValuePrefix = "__pp_tagval_";
 
 // Name of the zeroth specialization `Figure.void`
 inline constexpr llvm::StringLiteral kPPVoidSpecName = "void";
@@ -280,6 +284,16 @@ inline std::string ManglePPStartSpecs(StringRef GenName) {
 /// "Figure" -> "__stop_pp_specs_Figure"
 inline std::string ManglePPStopSpecs(StringRef GenName) {
   return (Twine(kPPStopSpecsPrefix) + GenName).str();
+}
+
+/// "PrintFigure" -> "__start_pp_table_PrintFigure"
+inline std::string ManglePPStartTable(StringRef FnName) {
+  return (Twine(kPPStartTablePrefix) + FnName).str();
+}
+
+/// "__pp_struct_Figure__rect" -> "__pp_tagval___pp_struct_Figure__rect"
+inline std::string ManglePPTagValue(StringRef StructName) {
+  return (Twine(kPPTagValuePrefix) + StructName).str();
 }
 
 inline std::string ManglePPDefaultHandler(StringRef FnName) {

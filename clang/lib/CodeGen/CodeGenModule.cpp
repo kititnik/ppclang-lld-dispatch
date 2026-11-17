@@ -1059,6 +1059,7 @@ void CodeGenModule::Release() {
     if (PGOStats.hasDiagnostics())
       PGOStats.reportDiagnostics(getDiags(), getCodeGenOpts().MainFileName);
   }
+  PPExtEmitGlobalTags();
   llvm::stable_sort(GlobalCtors, [](const Structor &L, const Structor &R) {
     return L.LexOrder < R.LexOrder;
   });
@@ -6667,9 +6668,6 @@ void CodeGenModule::PPExtInitGenOrSpec(llvm::InsertPosition IPoint,
                                        StringRef Name,
                                        llvm::Value *ParentObject) {
   const bool IsFullGeneralization = IsPPStructIdentifier(Name);
-  auto TagPrefix =
-      IsFullGeneralization ? ManglePPTag(Name.str()) : ManglePPTags(Name.str());
-  auto *GVTag = getModule().getGlobalVariable(TagPrefix);
 
   // Load ptr to tag field
   auto *Ty = PPExtGetTypeByName(Name);
@@ -6706,10 +6704,9 @@ void CodeGenModule::PPExtInitGenOrSpec(llvm::InsertPosition IPoint,
   // Store tag
   auto ASTIntTy = getContext().IntTy;
   auto IntTy = getTypes().ConvertTypeForMem(ASTIntTy);
-  llvm::Value *InitVal =
-      IsFullGeneralization
-          ? (llvm::Value *)new llvm::LoadInst(IntTy, GVTag, "", IPoint)
-          : (llvm::Value *)llvm::Constant::getNullValue(IntTy);
+  llvm::Value *InitVal = IsFullGeneralization
+                             ? PPExtGetTagValue(Name)
+                             : llvm::Constant::getNullValue(IntTy);
   new llvm::StoreInst(InitVal, SpecTypeField, IPoint);
 }
 
@@ -6770,23 +6767,119 @@ void CodeGenModule::PPExtInitGlobVar(llvm::GlobalVariable *GV) {
     return;
   }
 
-  std::string MangledName = ManglePPGvInit(GV->getName());
-  llvm::Function *F = getModule().getFunction(MangledName);
-  if (!F) {
-    auto *ResType = llvm::Type::getVoidTy(getLLVMContext());
-    SmallVector<llvm::Type *, 8> ArgTypes;
-    auto *FTy = llvm::FunctionType::get(ResType, ArgTypes, false);
-    F = llvm::Function::Create(FTy, llvm::Function::ExternalLinkage,
-                               MangledName, &getModule());
-    auto *BB = llvm::BasicBlock::Create(getLLVMContext(), "entry", F);
+  // The initializer is not set yet, tags are put there at the end of the module
+  PPGlobalTagInits.emplace_back(GV->getName().str(), Name.str());
+}
 
-    PPExtInitTypeTagsRecursively(Name, GV, BB);
+// Path of struct/array indices to the element of type Target at Offset
+static bool PPExtFindElementPath(const llvm::DataLayout &DL, llvm::Type *Ty,
+                                 uint64_t Offset, llvm::Type *Target,
+                                 SmallVectorImpl<unsigned> &Path) {
+  while (Offset != 0 || Ty != Target) {
+    if (auto *structTy = dyn_cast<llvm::StructType>(Ty)) {
+      const llvm::StructLayout *layout = DL.getStructLayout(structTy);
+      if (Offset >= layout->getSizeInBytes().getFixedValue()) {
+        return false;
+      }
+      unsigned idx = layout->getElementContainingOffset(Offset);
+      Offset -= layout->getElementOffset(idx).getFixedValue();
+      Path.push_back(idx);
+      Ty = structTy->getElementType(idx);
+    } else if (auto *arrayTy = dyn_cast<llvm::ArrayType>(Ty)) {
+      uint64_t elemSize =
+          DL.getTypeAllocSize(arrayTy->getElementType()).getFixedValue();
+      if (elemSize == 0 || Offset / elemSize >= arrayTy->getNumElements()) {
+        return false;
+      }
+      Path.push_back(Offset / elemSize);
+      Offset %= elemSize;
+      Ty = arrayTy->getElementType();
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
 
-    llvm::ReturnInst::Create(getLLVMContext(), BB);
+static llvm::Constant *PPExtSetElementAtPath(llvm::Constant *C,
+                                             ArrayRef<unsigned> Path,
+                                             llvm::Constant *Value) {
+  if (Path.empty()) {
+    return Value;
+  }
+  auto *structTy = dyn_cast<llvm::StructType>(C->getType());
+  auto *arrayTy = dyn_cast<llvm::ArrayType>(C->getType());
+  if (!structTy && !arrayTy) {
+    return nullptr;
+  }
+  unsigned numElems =
+      structTy ? structTy->getNumElements() : arrayTy->getNumElements();
+  SmallVector<llvm::Constant *, 8> elems;
+  for (unsigned i = 0; i < numElems; ++i) {
+    llvm::Constant *elem = C->getAggregateElement(i);
+    if (!elem) {
+      return nullptr;
+    }
+    elems.push_back(elem);
+  }
+  elems[Path[0]] =
+      PPExtSetElementAtPath(elems[Path[0]], Path.drop_front(), Value);
+  if (!elems[Path[0]]) {
+    return nullptr;
+  }
+  if (structTy) {
+    return llvm::ConstantStruct::get(structTy, elems);
+  }
+  return llvm::ConstantArray::get(arrayTy, elems);
+}
 
-    // PP-EXT TODO: Check priority value
-    AddGlobalCtor(F, 104);
-    adjustPPLinkage(F);
+void CodeGenModule::PPExtEmitGlobalTags() {
+  const llvm::DataLayout &dl = getDataLayout();
+  for (const auto &[gvName, typeName] : PPGlobalTagInits) {
+    auto *gv = getModule().getNamedGlobal(gvName);
+    if (!gv || !gv->hasInitializer()) {
+      // Defined in another file
+      continue;
+    }
+
+    // Generate the tag stores as usual, then move them into the initializer
+    auto *fn = llvm::Function::Create(llvm::FunctionType::get(VoidTy, false),
+                                      llvm::GlobalValue::InternalLinkage,
+                                      ManglePPGvInit(gvName), &getModule());
+    auto *bb = llvm::BasicBlock::Create(getLLVMContext(), "entry", fn);
+    PPExtInitTypeTagsRecursively(typeName, gv, bb);
+
+    llvm::Constant *init = gv->getInitializer();
+    for (auto &inst : *bb) {
+      auto *store = dyn_cast<llvm::StoreInst>(&inst);
+      if (!store) {
+        continue;
+      }
+      auto *value = dyn_cast<llvm::Constant>(store->getValueOperand());
+      llvm::APInt offset(dl.getIndexTypeSizeInBits(gv->getType()), 0);
+      auto *base = store->getPointerOperand()->stripAndAccumulateConstantOffsets(
+          dl, offset, /*AllowNonInbounds=*/true);
+      SmallVector<unsigned, 4> path;
+      if (!value || base != gv || offset.isNegative() ||
+          !PPExtFindElementPath(dl, gv->getValueType(), offset.getZExtValue(),
+                                value->getType(), path)) {
+        init = nullptr;
+        break;
+      }
+      init = PPExtSetElementAtPath(init, path, value);
+      if (!init) {
+        break;
+      }
+    }
+
+    fn->eraseFromParent();
+    if (!init) {
+      Error(SourceLocation(),
+            "cannot put PP specialization tags into the initializer of "
+            "global '" + gvName + "'");
+      continue;
+    }
+    gv->setInitializer(init);
   }
 }
 
@@ -6927,6 +7020,62 @@ llvm::GlobalVariable* CodeGenModule::PPExtGetOrCreateSpecMarker(StringRef Name) 
   return marker;
 }
 
+llvm::Constant *CodeGenModule::PPExtGetTagValue(StringRef StructName) {
+  // Absolute symbol defined by the linker, its value is the tag
+  std::string name = ManglePPTagValue(StructName);
+  auto *sym = getModule().getGlobalVariable(name);
+  if (!sym) {
+    sym = new llvm::GlobalVariable(getModule(), Int8Ty, false,
+                                   llvm::GlobalValue::ExternalLinkage, nullptr,
+                                   name);
+    sym->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    sym->setDSOLocal(true);
+  }
+  return llvm::ConstantExpr::getPtrToInt(sym, IntTy);
+}
+
+llvm::Value *CodeGenModule::PPExtGetSpecsCount(llvm::BasicBlock *BB,
+                                               StringRef GenName) {
+  // Number of records in pp_specs_<Gen>, "void" included
+  auto *specsStart =
+      getModule().getOrInsertGlobal(ManglePPStartSpecs(GenName), Int8PtrTy);
+  auto *specsStop =
+      getModule().getOrInsertGlobal(ManglePPStopSpecs(GenName), Int8PtrTy);
+  auto *startInt = new llvm::PtrToIntInst(specsStart, Int64Ty, "", BB);
+  auto *stopInt = new llvm::PtrToIntInst(specsStop, Int64Ty, "", BB);
+  auto *bytes = llvm::BinaryOperator::CreateSub(stopInt, startInt, "", BB);
+
+  auto *recordTy = llvm::ArrayType::get(VoidPtrTy, 2);
+  auto *recordSize = llvm::ConstantInt::get(
+      Int64Ty, getDataLayout().getTypeAllocSize(recordTy));
+  return llvm::BinaryOperator::CreateExactUDiv(bytes, recordSize, "", BB);
+}
+
+llvm::Value *
+CodeGenModule::PPExtGetTableIndex(llvm::BasicBlock *BB, llvm::Function *F,
+                                  const FunctionDecl::MMParams &Gens) {
+  // (tag0 * N1 + tag1) * N2 + tag2 ..., axis 0 is the most significant
+  llvm::Value *index = llvm::ConstantInt::get(Int64Ty, 0);
+  for (const auto &genParam : Gens.ParamsList) {
+    auto *genRD = genParam.BaseRD ? genParam.BaseRD : genParam.RD;
+    auto *count = PPExtGetSpecsCount(BB, genRD->getName());
+
+    auto *genRecTy = getTypes().ConvertTypeForMem(
+        genParam.RD->getTypeForDecl()->getCanonicalTypeInternal());
+    llvm::Value *tagIdxs[] = {
+        llvm::ConstantInt::get(Int32Ty, 0),
+        llvm::ConstantInt::get(Int32Ty, genParam.IdxOfTypeTag)};
+    auto *tagPtr = llvm::GetElementPtrInst::CreateInBounds(
+        genRecTy, F->getArg(genParam.ParamIdx), tagIdxs, "", BB);
+    auto *tag = new llvm::LoadInst(IntTy, tagPtr, "", BB);
+    auto *tag64 = new llvm::ZExtInst(tag, Int64Ty, "", BB);
+
+    auto *scaled = llvm::BinaryOperator::CreateMul(index, count, "", BB);
+    index = llvm::BinaryOperator::CreateAdd(scaled, tag64, "", BB);
+  }
+  return index;
+}
+
 void CodeGenModule::HandlePPExtensionMethods(llvm::Function *F, GlobalDecl GD) {
   PPExtInitStackAllocatedVars(F);
 
@@ -7055,21 +7204,8 @@ void CodeGenModule::HandlePPExtensionMethods(llvm::Function *F, GlobalDecl GD) {
       }
 
       if (Kind == PPSpecFuncKind::GetSpecSize) {
-        // Number of records in pp_specs_<Gen>, "void" included
         auto *bb = llvm::BasicBlock::Create(getLLVMContext(), "entry", FSpec);
-        auto *specsStart = getModule().getOrInsertGlobal(
-            ManglePPStartSpecs(TypeNameExtracted), Int8PtrTy);
-        auto *specsStop = getModule().getOrInsertGlobal(
-            ManglePPStopSpecs(TypeNameExtracted), Int8PtrTy);
-        auto *startInt = new llvm::PtrToIntInst(specsStart, Int64Ty, "", bb);
-        auto *stopInt = new llvm::PtrToIntInst(specsStop, Int64Ty, "", bb);
-        auto *bytes = llvm::BinaryOperator::CreateSub(stopInt, startInt, "", bb);
-
-        auto *recordTy = llvm::ArrayType::get(VoidPtrTy, 2);
-        auto *recordSize = llvm::ConstantInt::get(
-            Int64Ty, getDataLayout().getTypeAllocSize(recordTy));
-        auto *count =
-            llvm::BinaryOperator::CreateExactUDiv(bytes, recordSize, "", bb);
+        auto *count = PPExtGetSpecsCount(bb, TypeNameExtracted);
         auto *result = new llvm::TruncInst(count, IntTy, "", bb);
         llvm::ReturnInst::Create(getLLVMContext(), result, bb);
         continue;
@@ -7362,7 +7498,7 @@ void CodeGenModule::PPExtInitTypeTagsRecursively(StringRef NameOfVariable,
     auto *TagElem = llvm::GetElementPtrInst::CreateInBounds(
         HeadRecTy, HeadElem, IdxsTagField, "pp_spec_type", IPoint);
 
-    auto genName = ManglePPTag(NameOfVariable);
+    StringRef tagStructName = NameOfVariable;
 
     auto fourUnderscorePos = NameOfVariable.find("____");
     if (fourUnderscorePos != StringRef::npos) {
@@ -7377,10 +7513,10 @@ void CodeGenModule::PPExtInitTypeTagsRecursively(StringRef NameOfVariable,
         auto StartPos = NextPos + Sz - 1;
         SpecName = GenName.substr(StartPos, EndOfTypePos - StartPos);
         auto BaseName = GenName.substr(0, fourUnderscorePos);
-        genName = ManglePPTag(BaseName);
+        tagStructName = BaseName;
 
 #ifdef PPEXT_DUMP
-        StringRef GN(genName);
+        StringRef GN(tagStructName);
         printf("%s\n", GN.data());
 #endif
 
@@ -7389,17 +7525,15 @@ void CodeGenModule::PPExtInitTypeTagsRecursively(StringRef NameOfVariable,
       }
     }
 
-    StringRef DbgStr(genName);
-    auto *GV = getModule().getGlobalVariable(genName);
+    // The generalization itself ("void") has tag 0
     auto ASTIntTy = getContext().IntTy;
     auto IntTy = getTypes().ConvertTypeForMem(ASTIntTy);
-    if (GV) {
-      auto *LoadGlobalTag =
-          new llvm::LoadInst(IntTy, GV, "global_spec_tag", IPoint);
-      new llvm::StoreInst(LoadGlobalTag, TagElem, IPoint);
-    } else {
-      new llvm::StoreInst(llvm::Constant::getNullValue(IntTy), TagElem, IPoint);
+    llvm::Constant *tag = llvm::Constant::getNullValue(IntTy);
+    if (IsPPStructSpecialization(tagStructName) &&
+        !tagStructName.contains("____")) {
+      tag = PPExtGetTagValue(tagStructName);
     }
+    new llvm::StoreInst(tag, TagElem, IPoint);
 
     // tag for the current struct is inited
     // next step: init tags for direct fields
@@ -7680,9 +7814,6 @@ CodeGenModule::ExtractDefaultPPMMImplementation(llvm::Function *F,
     F->setAttributes(PAL);
   }
 
-  auto *TypeTagIdxExt = PPExtGetIndexForMM(&F->getEntryBlock(), Gens);
-  CreateCallPrintf(BB, "[PP-EXT] MM TypeTagIdxExt %lld\n", TypeTagIdxExt);
-
   auto FName = F->getName();
   auto FnTy = F->getFunctionType();
   auto initArrName = ManglePPMMInitArray(FName);
@@ -7702,15 +7833,13 @@ CodeGenModule::ExtractDefaultPPMMImplementation(llvm::Function *F,
 #endif
   }
 
-  llvm::Value *TypeTagsIdxs[] = {TypeTagIdxExt};
-  CreateCallPrintf(BB, "[PP-EXT] MM InitArr ptr %p\n", InitArr);
-  auto *LoadInitArr = new llvm::LoadInst(FnPtrType, InitArr, "", BB);
-  auto *Elem = llvm::GetElementPtrInst::CreateInBounds(FnPtrType, LoadInitArr,
-                                                       TypeTagsIdxs, "", BB);
-  CreateCallPrintf(BB, "[PP-EXT] MM InitArr elem %p\n", Elem);
-  auto LoadElem = new llvm::LoadInst(FnPtrType, Elem, "", BB);
-  CreateCallPrintf(BB, "[PP-EXT] MM InitArr LoadElem (to be executed): %p\n",
-                   LoadElem);
+  // Handler from the table built by the linker
+  auto *table = getModule().getOrInsertGlobal(
+      ManglePPStartTable(DemanglePPMM(FName).first), VoidPtrTy);
+  llvm::Value *cellIdxs[] = {PPExtGetTableIndex(BB, F, Gens)};
+  auto *cell = llvm::GetElementPtrInst::CreateInBounds(VoidPtrTy, table,
+                                                       cellIdxs, "", BB);
+  auto LoadElem = new llvm::LoadInst(VoidPtrTy, cell, "", BB);
 
   SmallVector<llvm::Value *> VecArgs;
   for (auto &arg : F->args()) {

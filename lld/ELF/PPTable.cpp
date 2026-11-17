@@ -36,11 +36,26 @@ static constexpr StringLiteral specsPrefix = "pp_specs_";
 static constexpr StringLiteral implPrefix = "pp_impl_";
 static constexpr StringLiteral tablePrefix = "pp_table_";
 static constexpr StringLiteral startSpecsPrefix = "__start_pp_specs_";
+static constexpr StringLiteral markerPrefix = "__pp_marker_";
+static constexpr StringLiteral tagValuePrefix = "__pp_tagval_";
 
 static void printHandlerSrc(ELFSyncStream &s, const PPSymRef &handler);
 
 // A pp_specs_<Gen> record is { name, create_spec }.
 static uint64_t specRecordSize(const Ctx &ctx) { return 2 * ctx.arg.wordsize; }
+
+// Calls fn(suffix, marker) for every __pp_marker_<suffix> defined in sec
+template <class Fn>
+static void forEachMarker(const InputSectionBase *sec, Fn fn) {
+  for (Symbol *sym : sec->file->getSymbols()) {
+    auto *d = dyn_cast_or_null<Defined>(sym);
+    if (!d || d->section != sec)
+      continue;
+    StringRef name = d->getName();
+    if (name.consume_front(markerPrefix))
+      fn(name, *d);
+  }
+}
 
 PPTableSection::PPTableSection(Ctx &ctx, StringRef fnName, PPDesc desc,
                                std::vector<PPImplRecord> records)
@@ -63,6 +78,7 @@ void PPTableSection::writeTo(uint8_t *buf) {
   auto startVAs = resolveStartVAs();
   if (!startVAs)
     return;
+  verifyTagValues(*startVAs);
 
   std::vector<const PPImplRecord *> cellOwner(desc.tableSize);
 
@@ -170,6 +186,27 @@ static void printHandlerSrc(ELFSyncStream &s, const PPSymRef &handler) {
     return;
   }
   s << sec->getSrcMsg(*d, d->value + handler.addend);
+}
+
+// __pp_tagval_ symbols are defined from the input order of pp_specs_ sections.
+// Check that the final layout gives the same tags.
+void PPTableSection::verifyTagValues(ArrayRef<uint64_t> startVAs) const {
+  for (size_t axis = 0; axis < desc.specsNames.size(); ++axis) {
+    for (const PPSpecNames &specs : desc.specsNames[axis]) {
+      forEachMarker(specs.section, [&](StringRef suffix, Defined &marker) {
+        auto *tagSym = dyn_cast_or_null<Defined>(
+            ctx.symtab->find((tagValuePrefix + suffix).str()));
+        if (!tagSym)
+          return;
+        uint64_t tag =
+            (marker.getVA(ctx) - startVAs[axis]) / specRecordSize(ctx);
+        if (tagSym->value != tag)
+          Err(ctx) << name << ": " << tagSym->getName() << " is "
+                   << tagSym->value << ", but the marker has tag " << tag
+                   << " (pp_specs_ sections were reordered)";
+      });
+    }
+  }
 }
 
 std::optional<std::vector<uint64_t>> PPTableSection::resolveStartVAs() const {
@@ -376,11 +413,34 @@ parseDesc(Ctx &ctx, const InputSectionBase &desc,
   return result;
 }
 
+// For every marker __pp_marker_<X> define the absolute symbol
+// __pp_tagval_<X> = tag, if something refers to it.
+static void defineTagValues(Ctx &ctx, const PPInputs &inputs) {
+  for (const auto &[gen, sections] : inputs.sectionsBySpecName) {
+    uint64_t base = 0;
+    for (const InputSectionBase *sec : sections) {
+      forEachMarker(sec, [&](StringRef suffix, Defined &marker) {
+        Symbol *tagSym = ctx.symtab->find((tagValuePrefix + suffix).str());
+        if (!tagSym || tagSym->isDefined() || tagSym->isCommon())
+          return;
+        uint64_t tag = base + marker.value / specRecordSize(ctx);
+        ctx.synthesizedSymbols.push_back(tagSym);
+        tagSym->resolve(ctx, Defined{ctx, ctx.internalFile, StringRef(),
+                                     STB_GLOBAL, STV_HIDDEN, STT_NOTYPE, tag,
+                                     /*size=*/0, nullptr});
+        tagSym->isUsedInRegularObj = true;
+      });
+      base += sec->getSize() / specRecordSize(ctx);
+    }
+  }
+}
+
 template <class ELFT> void elf::createPPTables(Ctx &ctx) {
   // TODO: если pp_desc_<Fn> встречается дважды, будут созданы две таблицы
   PPInputs ppSections = collectPPSections(ctx);
   if (errCount(ctx))
     return;
+  defineTagValues(ctx, ppSections);
   for (const InputSectionBase *is : ppSections.descSections) {
     PPDesc descInfo = parseDesc<ELFT>(ctx, *is, ppSections.sizeBySpecName,
                                       ppSections.sectionsBySpecName);

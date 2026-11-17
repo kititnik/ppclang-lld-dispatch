@@ -1881,6 +1881,13 @@ private:
   void PPExtRecordCreateSpec(llvm::Function *FnCreateSpec, RecordDecl *RDSpec,
                              llvm::Module &Parent);
   llvm::GlobalVariable *PPExtGetOrCreateSpecMarker(StringRef Name);
+  llvm::Constant *PPExtGetTagValue(StringRef StructName);
+  llvm::Value *PPExtGetSpecsCount(llvm::BasicBlock *BB, StringRef GenName);
+  llvm::Value *PPExtGetTableIndex(llvm::BasicBlock *BB, llvm::Function *F,
+                                  const FunctionDecl::MMParams &Gens);
+  void PPExtEmitGlobalTags();
+  // Globals of PP types, their tags go to the initializer: {global, type}
+  std::vector<std::pair<std::string, std::string>> PPGlobalTagInits;
 
   void AddPPSpecialization(llvm::Function *F,
                            const FunctionDecl::MMParams &Gens);

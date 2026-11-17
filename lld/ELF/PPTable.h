@@ -51,6 +51,7 @@ private:
   std::vector<PPImplRecord> records;
 
   std::optional<std::vector<uint64_t>> resolveStartVAs() const;
+  void verifyTagValues(ArrayRef<uint64_t> startVAs) const;
   std::vector<std::vector<StringRef>>
   resolveSpecNames(ArrayRef<uint64_t> startVAs) const;
   std::optional<uint64_t> computeCellIndex(const PPImplRecord &record,
