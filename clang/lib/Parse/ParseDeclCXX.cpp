@@ -1777,14 +1777,6 @@ auto Parser::PPExtGetIdForExistingOrNewlyCreatedGen(StringRef BaseName,
   return {IdType, &PP.getIdentifierTable().get(MangledNameRef)};
 }
 
-std::string Parser::PPExtConstructTagName(StringRef GenName) {
-  StringRef PPStructPrefix = kPPStructIdentifierPrefix;
-  auto Sz = PPStructPrefix.size();
-  auto NextPos = GenName.find(PPStructPrefix, Sz);
-  // 'NextPos-2' because there are 4 underscores
-  return ManglePPTag(GenName.substr(0, NextPos - 2).str());
-}
-
 DeclSpec::TST Parser::PPExtGetFieldTypeByTokKind(tok::TokenKind TK) {
   auto Res = DeclSpec::TST::TST_struct;
   switch (TK) {
@@ -2023,15 +2015,9 @@ for (const auto &DumpTagName : TagNames) {
     TestDecl->dump();
 #endif
 
-    std::string GVarName = ManglePPTag(TestNameStr);
-    PPGlobalVars.push_back(VarGenerate(GVarName));
-
     auto &V = ppMNames.VariantStructNames.back();
     if (NeedCtorsDefinitions) {
-      AddFunc(V.VariantCreateSpecFuncName, PPFuncMode::CreateSpec,
-              V.VariantTagVariableName, ppMNames);
-      AddFunc(V.VariantInitFuncName, PPFuncMode::Init,
-              V.VariantTagVariableName, ppMNames);
+      AddFunc(V.VariantCreateSpecFuncName);
     }
   }
 

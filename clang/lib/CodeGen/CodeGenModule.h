@@ -1878,8 +1878,6 @@ private:
 
   void PPExtInitGenOrSpec(llvm::InsertPosition IPoint, StringRef Name,
                           llvm::Value *ParentObject);
-  void PPExtRecordCreateSpec(llvm::Function *FnCreateSpec, RecordDecl *RDSpec,
-                             llvm::Module &Parent);
   llvm::GlobalVariable *PPExtGetOrCreateSpecMarker(StringRef Name);
   llvm::Constant *PPExtGetTagValue(StringRef StructName);
   llvm::Value *PPExtGetSpecsCount(llvm::BasicBlock *BB, StringRef GenName);
@@ -1895,22 +1893,14 @@ private:
                            const FunctionDecl::MMParams &Gens);
   void PPExtEmitDescRecord(llvm::Function *F, llvm::Function *DefaultHandler,
                            const FunctionDecl::MMParams &Gens);
-  void PPExtInitCreateSpecArray(StringRef GenName, llvm::Module &Parent);
-  llvm::Function *PPExtCreateMMRecorder(llvm::Function *BaseF);
   llvm::Function *
   ExtractDefaultPPMMImplementation(llvm::Function *F,
                                    const clang::FunctionDecl *FD);
-  llvm::Value *PPExtGetIndexForMM(llvm::BasicBlock *BB,
-                                  const FunctionDecl::MMParams &Gens);
 
   void PPExtInitTypeTagsRecursively(StringRef NameOfVariable,
                                     llvm::Value *PtrToObjForGEP,
                                     llvm::InsertPosition IPoint);
 
-  llvm::BasicBlock *InitPPHandlersArray(llvm::BasicBlock *BB,
-                                        llvm::Value *AllocatedBytes,
-                                        llvm::Value *HandlersArray,
-                                        llvm::Value *DefaultHandler);
   enum class InsertPrintfPos { Default, BeforeFirstInstr, BeforeRet };
   llvm::CallInst *
   CreateCallPrintf(llvm::BasicBlock *BB, StringRef FormatStr,

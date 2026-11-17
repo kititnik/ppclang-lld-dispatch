@@ -31,21 +31,9 @@ namespace clang {
 //===----------------------------------------------------------------------===//
 
 inline constexpr llvm::StringLiteral kPPMMIdentifierPrefix = "__pp_mm_";
-inline constexpr llvm::StringLiteral kPPMMArrayIdentifierPrefix =
-    "__pp_mminitarr_";
 inline constexpr llvm::StringLiteral kPPStructIdentifierPrefix = "__pp_struct_";
-inline constexpr llvm::StringLiteral kPPTagIdentifierPrefix = "__pp_tag_";
-inline constexpr llvm::StringLiteral kPPTagsIdentifierPrefix = "__pp_tags_";
-inline constexpr llvm::StringLiteral kPPIncTagsIdentifierPrefix =
-    "__pp_inc_tags_";
 inline constexpr llvm::StringLiteral kPPGvInitPrefix = "__pp_gvinit__";
 inline constexpr llvm::StringLiteral kPPDefaultPrefix = "__pp_default";
-inline constexpr llvm::StringLiteral kPPRecordPrefix = "__pp_record";
-inline constexpr llvm::StringLiteral kPPRecordCSPrefix = "__pp_record_cs_";
-inline constexpr llvm::StringLiteral kPPInitPrefix = "__pp_init_";
-inline constexpr llvm::StringLiteral kPPInitCSArrPrefix = "__pp_init_cs_arr_";
-inline constexpr llvm::StringLiteral kPPCSArrPrefix = "__pp_cs_arr_";
-inline constexpr llvm::StringLiteral kPPAllocPrefix = "__pp_alloc";
 inline constexpr llvm::StringLiteral kPPGeneralPrefix = "__pp_";
 inline constexpr llvm::StringLiteral kPPSpecSuffix = "__pp_spec";
 inline constexpr llvm::StringLiteral kPPPtrSuffix = "_pp_ptr";
@@ -132,17 +120,8 @@ inline std::optional<PPSpecFuncKind> GetPPSpecFuncKind(StringRef Name) {
 inline bool IsPPMMIdentifier(StringRef Name) {
   return Name.starts_with(kPPMMIdentifierPrefix);
 }
-inline bool IsPPMMArrayIdentifier(StringRef Name) {
-  return Name.starts_with(kPPMMArrayIdentifierPrefix);
-}
 inline bool IsPPStructIdentifier(StringRef Name) {
   return Name.starts_with(kPPStructIdentifierPrefix);
-}
-inline bool IsPPIncTagsIdentifier(StringRef Name) {
-  return Name.starts_with(kPPIncTagsIdentifierPrefix);
-}
-inline bool IsPPGvInitIdentifier(StringRef Name) {
-  return Name.starts_with(kPPGvInitPrefix);
 }
 inline bool IsPPDefaultHandler(StringRef Name) {
   return Name.starts_with(kPPDefaultPrefix);
@@ -187,12 +166,6 @@ inline std::string ManglePPMM(StringRef Name, unsigned Arity) {
   return std::move(Ss).str();
 }
 
-/// Mangle the init array name for a multimethod given its full MM name.
-/// "__pp_mm_1_zzz" -> "__pp_mminitarr___pp_mm_1_zzz"
-inline std::string ManglePPMMInitArray(StringRef MMName) {
-  return (Twine(kPPMMArrayIdentifierPrefix) + MMName).str();
-}
-
 /// Mangle a PP struct name from a generalization base and optional variant.
 /// Base-only ("Figure") -> "__pp_struct_Figure"
 /// Base + variant ("Figure", "Circle") -> "__pp_struct_Figure__Circle"
@@ -214,36 +187,8 @@ inline std::string ManglePPStruct(StringRef Base, StringRef Variant = "",
   return std::move(Ss).str();
 }
 
-inline std::string ManglePPTag(StringRef StructName) {
-  return (Twine(kPPTagIdentifierPrefix) + StructName).str();
-}
-
-inline std::string ManglePPTags(StringRef GenName) {
-  return (Twine(kPPTagsIdentifierPrefix) + GenName).str();
-}
-
-inline std::string ManglePPIncTags(StringRef GenName) {
-  return (Twine(kPPIncTagsIdentifierPrefix) + GenName).str();
-}
-
 inline std::string ManglePPGvInit(StringRef VarName) {
   return (Twine(kPPGvInitPrefix) + VarName).str();
-}
-
-inline std::string ManglePPCSArr(StringRef Name) {
-  return (Twine(kPPCSArrPrefix) + Name).str();
-}
-
-inline std::string ManglePPInitCSArr(StringRef GenName) {
-  return (Twine(kPPInitCSArrPrefix) + GenName).str();
-}
-
-inline std::string ManglePPInit(StringRef Name) {
-  return (Twine(kPPInitPrefix) + Name).str();
-}
-
-inline std::string ManglePPAlloc(StringRef Name) {
-  return (Twine(kPPAllocPrefix) + Name).str();
 }
 
 /// "Figure" -> "pp_specs_Figure"
@@ -298,14 +243,6 @@ inline std::string ManglePPTagValue(StringRef StructName) {
 
 inline std::string ManglePPDefaultHandler(StringRef FnName) {
   return (Twine(kPPDefaultPrefix) + FnName).str();
-}
-
-inline std::string ManglePPRecord(StringRef FnName) {
-  return (Twine(kPPRecordPrefix) + FnName).str();
-}
-
-inline std::string ManglePPRecordCS(StringRef SpecName) {
-  return (Twine(kPPRecordCSPrefix) + SpecName).str();
 }
 
 /// Mangle a spec function name with a struct suffix.
@@ -402,21 +339,6 @@ DemanglePPStructSpecialization(StringRef Mangled) {
   StringRef Body = DemanglePPStruct(Mangled);
   auto Pos = Body.find("__");
   return {Body.substr(0, Pos), Body.substr(Pos + 2)};
-}
-
-inline StringRef DemanglePPTag(StringRef Mangled) {
-  assert(Mangled.starts_with(kPPTagIdentifierPrefix));
-  return Mangled.substr(kPPTagIdentifierPrefix.size());
-}
-
-inline StringRef DemanglePPTags(StringRef Mangled) {
-  assert(Mangled.starts_with(kPPTagsIdentifierPrefix));
-  return Mangled.substr(kPPTagsIdentifierPrefix.size());
-}
-
-inline StringRef DemanglePPIncTags(StringRef Mangled) {
-  assert(IsPPIncTagsIdentifier(Mangled));
-  return Mangled.substr(kPPIncTagsIdentifierPrefix.size());
 }
 
 inline StringRef DemanglePPDefaultHandler(StringRef Mangled) {

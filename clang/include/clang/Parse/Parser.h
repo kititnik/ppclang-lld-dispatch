@@ -258,7 +258,6 @@ public:
   // PP-EXT TODO: can this be handled in-line?
   std::vector<clang::Parser::DeclGroupPtrTy> PPTypedefs;
   std::vector<clang::Parser::DeclGroupPtrTy> PPCtors;
-  std::vector<clang::Parser::DeclGroupPtrTy> PPGlobalVars;
   // PP-EXT TODO: Combine these two fields
   bool IsInPPMultimethod = false;
   StringRef PPMultimethodNameStr;
@@ -1580,16 +1579,6 @@ private:
   std::vector<PPStructInitDesc>
   PPExtGetRDListToInit(const RecordDecl *RD) const;
 
-  std::string PPExtConstructTagName(StringRef GenName);
-
-  struct PPMemberInitData {
-    Expr *Assign;
-    Expr *MemberAccess;
-  };
-
-  PPMemberInitData PPExtInitPPStruct(PPStructInitDesc IDesc,
-                                     Expr *MemberAccess);
-
   static DeclSpec::TST PPExtGetFieldTypeByTokKind(tok::TokenKind TK);
 
   struct SpecsDescr {
@@ -1610,29 +1599,18 @@ private:
                       Decl *TagDecl, RecordDecl *RD,
                       SmallVector<Decl *, 32> &FieldDecls,
                       const ParsedAttributes &Attrs, bool IsPointer);
-  enum class PPFuncMode { Init, Increment, CreateSpec, MMDefault };
-
   struct PPMangledNames {
     struct PPVariant {
       std::string VariantName;
-      std::string VariantInitFuncName;
-      std::string VariantTagVariableName;
       std::string VariantCreateSpecFuncName;
     };
 
     std::string BaseStructName;
-    std::string BaseTagVariableName;
-    std::string BaseIncFuncName;
     std::vector<PPVariant> VariantStructNames;
 
     void setBaseName(std::string BaseName);
 
     void addVariantName(std::string VariantName);
-
-    std::string MMName;
-    std::string MMArrayName;
-
-    void setMMName(std::string Name);
 
     LLVM_ATTRIBUTE_NOINLINE
     void dump();
@@ -1640,13 +1618,9 @@ private:
 
   static void dumpPPNames(PPMangledNames &p);
 
-  void AddStmts(StmtVector &Stmts, PPFuncMode Mode, std::string StrVarName,
-                PPMangledNames &ppMNames);
-
+  // Declares create_spec with an empty body, CodeGen generates the body
   void
-  AddFunc(std::string FuncName, PPFuncMode Mode, std::string TagNameToInit,
-          PPMangledNames &ppMNames,
-          DeclSpec::TST ReturnType = DeclSpec::TST_void,
+  AddFunc(std::string FuncName, DeclSpec::TST ReturnType = DeclSpec::TST_void,
           SmallVector<DeclaratorChunk::ParamInfo, 16> *ParamInfo = nullptr);
 
   void FieldGenerator(StringRef FieldName, DeclSpec::TST FieldType,
@@ -1654,9 +1628,6 @@ private:
                       const ParsedAttributes &TestAttrs, Decl *TestDecl,
                       SmallVector<Decl *, 32> &FieldDecls);
 
-  Sema::DeclGroupPtrTy VarGenerate(std::string TypeVarName,
-                                   bool IsPointer = false,
-                                   std::string TypeNameStr = "");
   Sema::DeclGroupPtrTy
   TypedefGenerate(std::string TypeVarName, DeclSpec::TST ReturnTypeSpecifier,
                   SmallVector<DeclaratorChunk::ParamInfo, 16> &ParamInfo);
