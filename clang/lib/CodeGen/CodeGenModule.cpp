@@ -7178,17 +7178,13 @@ void CodeGenModule::PPExtInitTypeTagsRecursively(StringRef NameOfVariable,
     // next step: init tags for direct fields
     auto FieldsToInit = PPExtGetRDListToInit(RecordTy);
     for (auto &F : FieldsToInit) {
-      llvm::APInt Apint0(32, 0);
       llvm::APInt ApintIdx(32, F.Idx);
-      auto *Number0 = llvm::ConstantInt::get(getLLVMContext(), Apint0);
       auto *NumberIdx = llvm::ConstantInt::get(getLLVMContext(), ApintIdx);
       llvm::Value *FieldIdxs[] = {Number0, NumberIdx};
-      auto Qty = Ty->getCanonicalTypeInternal();
-      auto *GenRecTy = getTypes().ConvertTypeForMem(Qty);
-      auto *HeadElem = llvm::GetElementPtrInst::CreateInBounds(
-          GenRecTy, PtrToObjForGEP, FieldIdxs, "pp_struct_field_to_init",
-          IPoint);
-      PPExtInitGenOrSpec(IPoint, F.RD->getName(), HeadElem);
+      // F.Idx is a field number in the head, not in the whole struct
+      auto *fieldElem = llvm::GetElementPtrInst::CreateInBounds(
+          HeadRecTy, HeadElem, FieldIdxs, "pp_struct_field_to_init", IPoint);
+      PPExtInitGenOrSpec(IPoint, F.RD->getName(), fieldElem);
     }
 
     auto Pos = NameOfVariable.find("____");
