@@ -1,109 +1,104 @@
+# ppclang: dispatch tables built by the linker
 
-Проект компилятора языка С с поддержкой процедурно-параметрического расширения
+[ppclang](https://gitverse.ru/kpdev/llvm-project) is a Clang-based compiler for
+[procedural-parametric C](https://softcraft.ru/ppp/), a C extension with open generic types and multimethods.
+A generic type gets new specializations, and a generic function gets new handlers,
+from any file in the program. So no single translation unit knows the whole
+dispatch table.
 
-Описание процедурно-параметрического подхода: https://www.mais-journal.ru/jour/article/view/1766
+ppclang used to assemble those tables at runtime: every handler came with a
+registration constructor that ran before `main`. This fork moves the job to
+the linker. The compiler emits small metadata records, and LLD builds the
+finished tables at link time. As a result, nothing runs at startup.
 
-Проект с тестами сравнения производительности данного подхода с другими: https://gitverse.ru/kpdev/multimethod-benchmarks
+## Example
 
-Проект с описанием паттернов программирования для процедурно-параметрического подхода: https://github.com/kreofil/evo-situations/
+```c
+// figure.h: a generic type and a generic function
+typedef struct Figure { int id; } <> Figure;
+void Print<Figure* f>(FILE* out);
 
------------------------------------
+// rect.c: a specialization and its handler, added in a separate file
+typedef struct Rectangle { int x, y; } Rectangle;
+Figure + <rect: Rectangle;>;
 
-# The LLVM Compiler Infrastructure
+void Print<Figure.rect* f>(FILE* out) {
+    fprintf(out, "rect %d x %d\n", f->@x, f->@y);
+}
 
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/llvm/llvm-project/badge)](https://securityscorecards.dev/viewer/?uri=github.com/llvm/llvm-project)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/8273/badge)](https://www.bestpractices.dev/projects/8273)
-[![libc++](https://github.com/llvm/llvm-project/actions/workflows/libcxx-build-and-test.yaml/badge.svg?branch=main&event=schedule)](https://github.com/llvm/llvm-project/actions/workflows/libcxx-build-and-test.yaml?query=event%3Aschedule)
-
-Welcome to the LLVM project!
-
-This repository contains the source code for LLVM, a toolkit for the
-construction of highly optimized compilers, optimizers, and run-time
-environments.
-
-The LLVM project has multiple components. The core of the project is
-itself called "LLVM". This contains all of the tools, libraries, and header
-files needed to process intermediate representations and convert them into
-object files. Tools include an assembler, disassembler, bitcode analyzer, and
-bitcode optimizer.
-
-C-like languages use the [Clang](https://clang.llvm.org/) frontend. This
-component compiles C, C++, Objective-C, and Objective-C++ code into LLVM bitcode
--- and from there into object files, using LLVM.
-
-Other components include:
-the [libc++ C++ standard library](https://libcxx.llvm.org),
-the [LLD linker](https://lld.llvm.org), and more.
-
-## Getting the Source Code and Building LLVM
-
-Consult the
-[Getting Started with LLVM](https://llvm.org/docs/GettingStarted.html#getting-the-source-code-and-building-llvm)
-page for information on building and running LLVM.
-
-For information on how to contribute to the LLVM project, please take a look at
-the [Contributing to LLVM](https://llvm.org/docs/Contributing.html) guide.
-
-## Getting in touch
-
-Join the [LLVM Discourse forums](https://discourse.llvm.org/), [Discord
-chat](https://discord.gg/xS7Z362),
-[LLVM Office Hours](https://llvm.org/docs/GettingInvolved.html#office-hours) or
-[Regular sync-ups](https://llvm.org/docs/GettingInvolved.html#online-sync-ups).
-
-The LLVM project has adopted a [code of conduct](https://llvm.org/docs/CodeOfConduct.html) for
-participants to all modes of communication within the project.
-
-## Build Procedural-Parametric Extension
-
-It is not differs from mainstream llvm build.
-But you can use the recommended command line for debug build
-```
-cmake -DCMAKE_BUILD_TYPE:STRING=Debug -DBUILD_SHARED_LIBS:STRING=ON "-DLLVM_TARGETS_TO_BUILD:STRING=X86" -DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=TRUE "-DLLVM_ENABLE_PROJECTS:STRING=clang" -DLLVM_OPTIMIZED_TABLEGEN:STRING=ON -DLLVM_CCACHE_BUILD:STRING=ON -DCMAKE_C_COMPILER:FILEPATH=<path-to-c-compiler> -DCMAKE_CXX_COMPILER:FILEPATH=<path-to-cpp-compiler> -S<source-path> -B<build-path> -G Ninja
-```
-After that it is needed to build clang:
-```
-cmake --build <build-path> --config Debug --target all --
-```
-And check if it is actually works:
-```
-<build-path>/bin/llvm-lit <source-path>/clang/test/CodeGen/pp-linked.c
+// main.c
+Print<fig>(stdout);   // one indexed jump through a table that LLD filled in
 ```
 
+## How it works
 
-# Setup Docker (need only once)
+For every generic type and function, the compiler emits records into three kinds
+of sections:
 
-sudo apt-get update
-sudo apt install docker.io
-sudo usermod -aG docker $USER
-newgrp docker
-docker run --rm hello-world
-docker build -t llvm-builder .
+- `pp_specs_<Gen>`: one record per specialization (its name and its `create_spec`);
+- `pp_impl_<Fn>`: one record per handler (the handler address plus the specialization on each axis);
+- `pp_desc_<Fn>`: one record per generic function (the default handler and its axes).
 
-# Build llvm
+LLD merges same-named sections across all object files, as it always does. A
+specialization's tag is simply its position in the merged `pp_specs_` section,
+so the object tag, the table index and the `get_spec_ptr` index all come from
+the same place and cannot disagree. LLD exposes each tag as an absolute symbol,
+reads the `pp_impl_` records through their relocations, and fills in
+`pp_table_<Fn>`. It reports duplicate handlers, and it warns about generic
+functions that have no handlers.
 
-Шаг 1
-В скрипте run_docker.sh поменяйте пути до исходников llvm-project
-И напишите пути до папок сборки и установки
+## Results
 
-Шаг 2
-Выполните
-$ ./run_docker.sh
+Six test programs were measured before and after the change (details in
+[docs/benchmark.md](docs/benchmark.md)):
 
-Шаг 3
-Должен загрузиться докер
-В нем выполните скрипт
-$ /usr/local/bin/build.sh
+| | before | after |
+|---|---|---|
+| Time to `main`, 4096-handler program | 15.2 ms | 6.0 ms (−61%) |
+| Constructors run before `main` | 44 – 12 615 | 0 |
+| Heap allocated before `main` | 1 – 786 KB | 0 |
+| Stripped binary size | | −45…−53% |
+| Compile time | | −8…−21% |
+| Extra link time spent on tables | | +1…3% |
+| Cost of a call | | unchanged |
 
-Шаг 4
-После завершения скрипта в папке сборки (путь до который вы прописали в ./run_docker.sh) будет clang и все необходимые инструменты
-Можно запустить тест, чтобы убедиться, что все работает как надо
-$ ./bin/llvm-lit /src/clang/test/CodeGen/pp-base.c
+On the clang side the change removes 734 lines of code. The table builder is a
+single new file in LLD of about 560 lines.
 
-Шаг 5
-Чтобы выйти из докера
-$ exit
+## Limitations
 
-Шаг 6
-чтобы снова зайти в докер
-$ ./run_docker.sh
+- Only ELF on x86-64, and only `-no-pie`.
+- Shared libraries are not supported. Static archives need `--whole-archive`.
+- Tags depend on the order of object files on the command line.
+- A sparse table with high arity is stored in the file in full: `Π Nᵢ × 8` bytes.
+
+## Where the code is
+
+- **All changes in this fork:** [`pp-extension-v21.1.8...pp-linker-tables`](https://github.com/kititnik/ppclang-lld-dispatch/compare/pp-extension-v21.1.8...pp-linker-tables)
+- **Table builder:** [`lld/ELF/PPTable.cpp`](lld/ELF/PPTable.cpp)
+- **Compiler side:** `clang/lib/CodeGen`, `clang/lib/Parse`
+
+## Building
+
+Build it like a normal LLVM build, with `clang` and `lld` enabled:
+
+```sh
+cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DLLVM_ENABLE_PROJECTS="clang;lld" -DLLVM_TARGETS_TO_BUILD=X86
+ninja -C build clang lld
+build/bin/clang -no-pie -fuse-ld=lld --ld-path=build/bin/ld.lld *.c
+```
+
+## Credits
+
+The procedural-parametric approach is by A. I. Legalov
+([overview](https://softcraft.ru/ppp/),
+[paper](https://www.mais-journal.ru/jour/article/view/1766), both in Russian).
+
+ppclang, the base of this fork, is by Pavel Kosov
+([gitverse.ru/kpdev/llvm-project](https://gitverse.ru/kpdev/llvm-project)).
+
+The link-time tables in this fork are my work.
+
+LLVM is distributed under the Apache License v2.0 with LLVM Exceptions, see
+[LICENSE.TXT](LICENSE.TXT).
