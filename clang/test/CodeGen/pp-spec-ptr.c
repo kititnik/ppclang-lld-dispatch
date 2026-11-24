@@ -1,5 +1,5 @@
-// RUN: %clang -c %s -o %t.o
-// RUN: %clang %t.o -o %t.out
+// RUN: %clang -no-pie -fuse-ld=lld -c %s -o %t.o
+// RUN: %clang -no-pie -fuse-ld=lld %t.o -o %t.out
 // RUN: %t.out | FileCheck %s -check-prefix=CHECK-RT
 
 

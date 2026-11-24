@@ -1,4 +1,4 @@
-// RUN: %clang -Werror=incompatible-pointer-types %s -o %t.out && %t.out | FileCheck %s -check-prefix=CHECK-RT
+// RUN: %clang -no-pie -fuse-ld=lld -Werror=incompatible-pointer-types %s -o %t.out && %t.out | FileCheck %s -check-prefix=CHECK-RT
 
 #include <stdio.h>
 

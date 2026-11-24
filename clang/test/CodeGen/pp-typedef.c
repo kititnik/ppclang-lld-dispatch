@@ -1,5 +1,5 @@
 
-// RUN: %clang %s -o %t
+// RUN: %clang -no-pie -fuse-ld=lld %s -o %t
 // RUN: %t 2>&1 | FileCheck %s
 
 #include <stdio.h>

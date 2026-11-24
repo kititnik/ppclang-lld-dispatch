@@ -1,5 +1,5 @@
 // RUN: %clang -S -emit-llvm %s 2>&1 -o - | FileCheck %s -check-prefix=CHECK-IR
-// RUN: %clang %s -o %t.out && %t.out | FileCheck %s -check-prefix=CHECK-RT
+// RUN: %clang -no-pie -fuse-ld=lld %s -o %t.out && %t.out | FileCheck %s -check-prefix=CHECK-RT
 
 #include <stdio.h>
 

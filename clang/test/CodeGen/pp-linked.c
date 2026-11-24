@@ -1,8 +1,8 @@
 
-// RUN: %clang -c %S/Inputs/Figure.c -o %t.f.o
-// RUN: %clang -c %S/Inputs/Triangle.c -o %t.t.o
-// RUN: %clang -c %s -o %t.a.o
-// RUN: %clang %t.f.o %t.t.o %t.a.o -o %t.out
+// RUN: %clang -no-pie -fuse-ld=lld -c %S/Inputs/Figure.c -o %t.f.o
+// RUN: %clang -no-pie -fuse-ld=lld -c %S/Inputs/Triangle.c -o %t.t.o
+// RUN: %clang -no-pie -fuse-ld=lld -c %s -o %t.a.o
+// RUN: %clang -no-pie -fuse-ld=lld %t.f.o %t.t.o %t.a.o -o %t.out
 // RUN: %t.out | FileCheck %s -check-prefix=CHECK-RT
 
 #include "Inputs/pp-linked-figure.h"

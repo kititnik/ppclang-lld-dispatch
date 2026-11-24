@@ -1,7 +1,7 @@
 // RUN~: %clang -S -emit-llvm %s -o - | FileCheck %s -check-prefix=CHECK-LOGS
 // RUN~: %clang -S -Xclang -ast-dump -emit-llvm %s -o - | FileCheck %s -check-prefix=CHECK-AST
 // RUN~: %clang -S -emit-llvm %s 2>&1 -o - | FileCheck %s -check-prefix=CHECK-IR
-// RUN: %clang %s -o %t.out && %t.out | FileCheck %s -check-prefix=CHECK-RT
+// RUN: %clang -no-pie -fuse-ld=lld %s -o %t.out && %t.out | FileCheck %s -check-prefix=CHECK-RT
 
 // CHECK-LOGS:      [PPMC] Parse extension
 // CHECK-LOGS-NEXT:   Token -> Kind: [struct]

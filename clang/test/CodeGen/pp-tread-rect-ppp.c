@@ -1,5 +1,5 @@
 // clang -pthread thread-rect-ppp.c
-// RUN: %clang -pthread %s -o %t.out
+// RUN: %clang -no-pie -fuse-ld=lld -pthread %s -o %t.out
 // RUN: %t.out | FileCheck %s -check-prefix=CHECK-RT
 
 #include <stdlib.h>
