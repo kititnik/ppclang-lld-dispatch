@@ -285,7 +285,12 @@ static void readDescSpecs(const InputFile &file, PPDesc &out,
   for (const RelTy &rel : rels) {
     size_t fieldNum = rel.r_offset / file.ctx.arg.wordsize;
     if (fieldNum == 0) {
-      out.defaultHandler = {&file.getRelocTargetSym(rel), getAddend<ELFT>(rel)};
+      Symbol &sym = file.getRelocTargetSym(rel);
+      // A weak reference in the default field means "no default handler" 
+      // Empty cells are then reported as errors instead of being filled with 0
+      if (sym.isUndefined())
+        continue;
+      out.defaultHandler = {&sym, getAddend<ELFT>(rel)};
       continue;
     }
     StringRef name = file.getRelocTargetSym(rel).getName();
